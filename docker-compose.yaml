@@ -1,0 +1,16 @@
+services:
+  jetson_anomaly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jetson_anomaly:dev
+    container_name: jetson_anomaly_cont
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      CYCLONEDDS_URI: ${CYCLONEDDS_URI:-}
+    volumes:
+      - ./config:/workspace/config:ro
+    restart: unless-stopped

@@ -1,0 +1,33 @@
+# Runtime config for the Jetson anomaly detector node.
+
+# Start with mock mode to verify ROS 2 connectivity before installing ML dependencies.
+detector_backend: mock
+
+# Change this if the RealSense image topic differs in your robot stack.
+image_topic: /camera/realsense/color/image_raw
+
+event_topic: /anomaly_events
+debug_image_topic: /anomaly/debug_image
+publish_debug_image: true
+
+# Run inference on every Nth frame. Increase this on weak networks or when using larger models.
+inference_every_n_frames: 5
+min_confidence: 0.35
+min_event_interval_s: 1.0
+
+# Simple first-pass heuristic: detections whose box bottom is in the lower part of the image
+# are treated as possible floor anomalies.
+floor_region_start_ratio: 0.55
+
+# YOLO mode settings. Used only when detector_backend: yolo
+model_path: yolov8n.pt
+
+# Labels that are suspicious when found in the floor region.
+anomaly_labels:
+  - bottle
+  - cup
+  - backpack
+  - suitcase
+  - chair
+  - person
+  - sports ball
