@@ -181,15 +181,33 @@ jobs:
         env:
           SSH_USER: ${{ secrets.JETSON_SSH_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.JETSON_SSH_PRIVATE_KEY }}
+          SSH_PRIVATE_KEY_B64: ${{ secrets.JETSON_SSH_PRIVATE_KEY_B64 }}
         run: |
           set -e
-          if [ -z "$SSH_USER" ] || [ -z "$SSH_PRIVATE_KEY" ]; then
-            echo "JETSON_SSH_USER and JETSON_SSH_PRIVATE_KEY secrets are required for docker load on Jetson." >&2
+          if [ -z "$SSH_USER" ]; then
+            echo "JETSON_SSH_USER secret is required for docker load on Jetson." >&2
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/jetson_key
+
+          if [ -n "$SSH_PRIVATE_KEY_B64" ]; then
+            printf '%s' "$SSH_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/jetson_key
+          elif [ -n "$SSH_PRIVATE_KEY" ]; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" | sed 's/\r$//' > ~/.ssh/jetson_key
+          else
+            echo "Set JETSON_SSH_PRIVATE_KEY_B64 (recommended) or JETSON_SSH_PRIVATE_KEY." >&2
+            exit 1
+          fi
+
           chmod 600 ~/.ssh/jetson_key
+          if grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-)' ~/.ssh/jetson_key; then
+            echo "The configured SSH key looks like a PUBLIC key. GitHub secret must contain the PRIVATE key." >&2
+            exit 1
+          fi
+          if ! ssh-keygen -y -f ~/.ssh/jetson_key > ~/.ssh/jetson_key.pub; then
+            echo "Invalid SSH private key. Use an unencrypted OpenSSH private key, preferably via JETSON_SSH_PRIVATE_KEY_B64." >&2
+            exit 1
+          fi
           ssh-keyscan -H "$JETSON_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "ssh_user=$SSH_USER" >> "$GITHUB_ENV"
 

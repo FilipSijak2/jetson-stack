@@ -85,7 +85,36 @@ Required GitHub secrets:
 
 - `TAILSCALE_AUTHKEY`
 - `JETSON_SSH_USER`
-- `JETSON_SSH_PRIVATE_KEY`
+- `JETSON_SSH_PRIVATE_KEY_B64` (recommended) or `JETSON_SSH_PRIVATE_KEY`
+
+Generate a dedicated deploy key:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "github-actions-jetson" -f jetson_github_actions_ed25519
+```
+
+Add the public key to the Jetson user:
+
+```bash
+ssh-copy-id -i jetson_github_actions_ed25519.pub <jetson-user>@100.125.121.125
+```
+
+Use the Jetson Linux username as `JETSON_SSH_USER`. Put the private key in
+GitHub secrets. The base64 form avoids multiline copy/paste issues:
+
+```bash
+base64 -w0 jetson_github_actions_ed25519
+```
+
+On PowerShell:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("jetson_github_actions_ed25519"))
+```
+
+Save that value as `JETSON_SSH_PRIVATE_KEY_B64`. If using
+`JETSON_SSH_PRIVATE_KEY` instead, paste the full private key including
+`-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----`.
 
 After a successful push build, run on the Jetson:
 
