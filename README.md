@@ -142,8 +142,10 @@ at container startup and points CycloneDDS at `ROBOT_TAILSCALE_IP`.
 Raspberry Pi-side config is in `stack/.env`:
 
 ```bash
-# Jetson Orin Tailscale IP:
+# Jetson is always configured as a soft DDS peer. If it is unreachable,
+# CycloneDDS prunes the peer after this delay so the Pi stack keeps running.
 JETSON_TAILSCALE_IP=100.125.121.125
+JETSON_DDS_PRUNE_DELAY=5s
 PI_DDS_WIFI_INTERFACE=wlan0
 PI_DDS_TAILSCALE_INTERFACE=tailscale0
 ```
