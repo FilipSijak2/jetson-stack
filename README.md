@@ -122,6 +122,53 @@ After a successful push build, run on the Jetson:
 docker compose up -d
 ```
 
+## ROS 2 Over Tailscale
+
+ROS 2 discovery is handled by CycloneDDS static peers because multicast
+discovery is not reliable over Tailscale. The IPs are intentionally configured
+through env/config files, not inside Python nodes.
+
+Jetson-side config is in `.env` copied from `.env.example`:
+
+```bash
+cp .env.example .env
+# Raspberry Pi Tailscale IP:
+ROBOT_TAILSCALE_IP=100.102.66.116
+```
+
+`/workspace/scripts/start_jetson_anomaly.sh` generates `/tmp/cyclonedds.xml`
+at container startup and points CycloneDDS at `ROBOT_TAILSCALE_IP`.
+
+Raspberry Pi-side config is in `stack/.env`:
+
+```bash
+# Jetson Orin Tailscale IP:
+JETSON_TAILSCALE_IP=100.125.121.125
+PI_DDS_WIFI_INTERFACE=wlan0
+PI_DDS_TAILSCALE_INTERFACE=tailscale0
+```
+
+After changing those values on the Pi, regenerate the mounted DDS file and
+restart the stack:
+
+```bash
+cd ~/stack
+scripts/render_cyclonedds_config.sh
+docker compose up -d
+```
+
+If the Jetson Tailscale IP used by GitHub Actions changes, set the repository
+Actions variable `JETSON_HOST`; the workflow falls back to `100.125.121.125`.
+`ROS_DOMAIN_ID` must match on both machines.
+
+Quick checks on the Jetson:
+
+```bash
+docker exec -it jetson_anomaly_cont bash
+ros2 topic list | grep realsense
+ros2 topic hz /camera/realsense/color/image_raw
+```
+
 ## Suggested next steps
 
 1. Run mock mode against the live camera topic.

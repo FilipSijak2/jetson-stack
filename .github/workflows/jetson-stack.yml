@@ -21,7 +21,7 @@ concurrency:
 
 env:
   IMAGE_BASE: jetson_anomaly
-  JETSON_HOST: 100.125.121.125
+  JETSON_HOST: ${{ vars.JETSON_HOST || '100.125.121.125' }}
   IMAGE_ARCHIVE: /tmp/jetson_anomaly_image.tar
 
 jobs:
@@ -40,6 +40,9 @@ jobs:
 
       - name: Validate launch syntax
         run: python -m py_compile src/jetson_anomaly_detector/launch/anomaly_detector.launch.py
+
+      - name: Validate shell scripts
+        run: bash -n scripts/start_jetson_anomaly.sh
 
       - name: Validate topic contract
         run: |

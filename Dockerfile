@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 COPY src /workspace/src
 COPY config /workspace/config
+COPY scripts /workspace/scripts
 
 RUN . /opt/ros/humble/setup.sh && colcon build --symlink-install
+RUN chmod +x /workspace/scripts/start_jetson_anomaly.sh
 
-CMD ["bash", "-lc", "source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash && ros2 launch jetson_anomaly_detector anomaly_detector.launch.py config_file:=/workspace/config/anomaly_detector.yaml"]
+CMD ["/workspace/scripts/start_jetson_anomaly.sh"]
