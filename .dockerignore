@@ -1,0 +1,14 @@
+.git
+.github
+build/
+install/
+log/
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+models/
+*.onnx
+*.engine
+*.pt
+*.pth

@@ -12,9 +12,10 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
 import rclpy
 import yaml
 from cv_bridge import CvBridge
@@ -39,7 +40,20 @@ class AnomalyDetectorNode(Node):
         self.config = self._load_config(config_file)
 
         self.image_topic = self.config.get('image_topic', '/camera/realsense/color/image_raw')
+        self.depth_topic = self.config.get(
+            'depth_topic',
+            '/camera/realsense/aligned_depth_to_color/image_raw',
+        )
         self.event_topic = self.config.get('event_topic', '/anomaly_events')
+        self.detections_topic = self.config.get('detections_topic', '/jetson_ai/detections')
+        self.anomaly_category_topic = self.config.get(
+            'anomaly_category_topic',
+            '/jetson_ai/anomaly_category',
+        )
+        self.anomaly_detail_topic = self.config.get(
+            'anomaly_detail_topic',
+            '/jetson_ai/anomaly_detail',
+        )
         self.debug_image_topic = self.config.get('debug_image_topic', '/anomaly/debug_image')
         self.backend = self.config.get('detector_backend', 'mock')
         self.min_confidence = float(self.config.get('min_confidence', 0.35))
@@ -47,12 +61,17 @@ class AnomalyDetectorNode(Node):
         self.publish_debug_image = bool(self.config.get('publish_debug_image', True))
         self.floor_region_start_ratio = float(self.config.get('floor_region_start_ratio', 0.55))
         self.anomaly_labels = set(self.config.get('anomaly_labels', ['bottle', 'cup', 'backpack', 'chair', 'person']))
+        self.enable_depth_anomaly = bool(self.config.get('enable_depth_anomaly', True))
+        self.near_obstacle_m = float(self.config.get('near_obstacle_m', 0.55))
+        self.near_obstacle_min_ratio = float(self.config.get('near_obstacle_min_ratio', 0.08))
+        self.center_roi_fraction = float(self.config.get('center_roi_fraction', 0.45))
 
         self.bridge = CvBridge()
         self.frame_count = 0
         self.last_event_time = 0.0
         self.min_event_interval_s = float(self.config.get('min_event_interval_s', 1.0))
         self.yolo_model = None
+        self.latest_depth = None
 
         if self.backend == 'yolo':
             self._init_yolo()
@@ -61,6 +80,9 @@ class AnomalyDetectorNode(Node):
             self.backend = 'mock'
 
         self.event_pub = self.create_publisher(String, self.event_topic, 10)
+        self.detections_pub = self.create_publisher(String, self.detections_topic, 10)
+        self.anomaly_category_pub = self.create_publisher(String, self.anomaly_category_topic, 10)
+        self.anomaly_detail_pub = self.create_publisher(String, self.anomaly_detail_topic, 10)
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, 10) if self.publish_debug_image else None
         self.image_sub = self.create_subscription(
             Image,
@@ -68,9 +90,18 @@ class AnomalyDetectorNode(Node):
             self._on_image,
             qos_profile_sensor_data,
         )
+        self.depth_sub = None
+        if self.enable_depth_anomaly:
+            self.depth_sub = self.create_subscription(
+                Image,
+                self.depth_topic,
+                self._on_depth,
+                qos_profile_sensor_data,
+            )
         self.get_logger().info(
             f"Jetson anomaly detector started: backend={self.backend}, image_topic={self.image_topic}, "
-            f"event_topic={self.event_topic}"
+            f"event_topic={self.event_topic}, detections_topic={self.detections_topic}, "
+            f"anomaly_category_topic={self.anomaly_category_topic}"
         )
 
     def _load_config(self, config_file: str) -> Dict[str, Any]:
@@ -110,27 +141,39 @@ class AnomalyDetectorNode(Node):
 
         detections = self._detect(frame)
         anomalies = self._filter_anomalies(detections, frame.shape[0])
+        category, detail, depth_roi = self._categorize_anomaly(frame, detections, anomalies)
 
-        if anomalies and time.time() - self.last_event_time >= self.min_event_interval_s:
+        self._publish_detections(msg, detections)
+        self._publish_anomaly_state(category, detail)
+
+        if category != 'none' and time.time() - self.last_event_time >= self.min_event_interval_s:
             self.last_event_time = time.time()
             event = {
-                'stamp': {
-                    'sec': int(msg.header.stamp.sec),
-                    'nanosec': int(msg.header.stamp.nanosec),
-                },
+                'stamp': self._stamp_dict(msg),
                 'frame_id': msg.header.frame_id,
                 'source_image_topic': self.image_topic,
                 'backend': self.backend,
+                'category': category,
+                'detail': detail,
                 'anomaly_count': len(anomalies),
                 'anomalies': [d.__dict__ for d in anomalies],
+                'detections': [d.__dict__ for d in detections],
             }
             out = String()
             out.data = json.dumps(event)
             self.event_pub.publish(out)
 
         if self.debug_pub is not None:
-            debug = self._draw_debug(frame, detections, anomalies)
-            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            debug = self._draw_debug(frame, detections, anomalies, category, detail, depth_roi)
+            debug_msg = self.bridge.cv2_to_imgmsg(debug, encoding='bgr8')
+            debug_msg.header = msg.header
+            self.debug_pub.publish(debug_msg)
+
+    def _on_depth(self, msg: Image) -> None:
+        try:
+            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as exc:
+            self.get_logger().warn(f'Failed to convert depth image: {exc}')
 
     def _detect(self, frame) -> List[Detection]:
         if self.backend == 'mock':
@@ -154,6 +197,101 @@ class AnomalyDetectorNode(Node):
 
         return []
 
+    def _publish_detections(self, msg: Image, detections: List[Detection]) -> None:
+        out = String()
+        out.data = json.dumps({
+            'stamp': self._stamp_dict(msg),
+            'frame_id': msg.header.frame_id,
+            'source_image_topic': self.image_topic,
+            'backend': self.backend,
+            'detections': [d.__dict__ for d in detections],
+        })
+        self.detections_pub.publish(out)
+
+    def _publish_anomaly_state(self, category: str, detail: str) -> None:
+        category_msg = String()
+        category_msg.data = category
+        self.anomaly_category_pub.publish(category_msg)
+
+        detail_msg = String()
+        detail_msg.data = detail
+        self.anomaly_detail_pub.publish(detail_msg)
+
+    def _categorize_anomaly(
+        self,
+        frame,
+        detections: List[Detection],
+        anomalies: List[Detection],
+    ) -> Tuple[str, str, Optional[List[int]]]:
+        if anomalies:
+            strongest = max(anomalies, key=lambda det: det.confidence)
+            return (
+                'semantic_object',
+                f'label={strongest.label} confidence={strongest.confidence:.2f}',
+                strongest.bbox_xyxy,
+            )
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if float(np.mean(gray)) < 6.0:
+            return 'camera_visibility', 'dark_frame', None
+
+        if not self.enable_depth_anomaly:
+            return 'none', 'ok', None
+
+        depth = self.latest_depth
+        if depth is None:
+            return 'none', 'waiting_for_depth', None
+
+        depth_m = self._depth_to_meters(depth)
+        if depth_m.size == 0:
+            return 'none', 'invalid_depth', None
+
+        h, w = depth_m.shape[:2]
+        roi_fraction = max(0.1, min(1.0, self.center_roi_fraction))
+        roi_w = int(w * roi_fraction)
+        roi_h = int(h * roi_fraction)
+        x1 = max(0, (w - roi_w) // 2)
+        y1 = max(0, (h - roi_h) // 2)
+        x2 = min(w, x1 + roi_w)
+        y2 = min(h, y1 + roi_h)
+        roi = depth_m[y1:y2, x1:x2]
+        valid = np.isfinite(roi) & (roi > 0.05)
+        if not np.any(valid):
+            return 'none', 'no_valid_depth_in_roi', None
+
+        near = valid & (roi < self.near_obstacle_m)
+        ratio = float(np.count_nonzero(near)) / float(np.count_nonzero(valid))
+        if ratio >= self.near_obstacle_min_ratio:
+            median = float(np.median(roi[near]))
+            return (
+                'depth_near_object',
+                f'median_m={median:.2f} ratio={ratio:.2f}',
+                [x1, y1, x2, y2],
+            )
+
+        if detections:
+            return 'none', f'objects_detected count={len(detections)}', None
+        return 'none', 'ok', None
+
+    @staticmethod
+    def _depth_to_meters(depth) -> np.ndarray:
+        arr = np.asarray(depth, dtype=np.float32)
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        if arr.size == 0:
+            return arr
+        finite = arr[np.isfinite(arr)]
+        if finite.size and float(np.max(finite)) > 50.0:
+            arr = arr * 0.001
+        return arr
+
+    @staticmethod
+    def _stamp_dict(msg: Image) -> Dict[str, int]:
+        return {
+            'sec': int(msg.header.stamp.sec),
+            'nanosec': int(msg.header.stamp.nanosec),
+        }
+
     def _filter_anomalies(self, detections: List[Detection], image_height: int) -> List[Detection]:
         floor_y = int(image_height * self.floor_region_start_ratio)
         anomalies: List[Detection] = []
@@ -167,11 +305,22 @@ class AnomalyDetectorNode(Node):
                 anomalies.append(det)
         return anomalies
 
-    def _draw_debug(self, frame, detections: List[Detection], anomalies: List[Detection]):
+    def _draw_debug(
+        self,
+        frame,
+        detections: List[Detection],
+        anomalies: List[Detection],
+        category: str,
+        detail: str,
+        depth_roi: Optional[List[int]],
+    ):
         anomaly_boxes = {tuple(a.bbox_xyxy) for a in anomalies}
         h, w = frame.shape[:2]
         floor_y = int(h * self.floor_region_start_ratio)
         cv2.line(frame, (0, floor_y), (w, floor_y), (255, 255, 255), 2)
+        if depth_roi is not None and category == 'depth_near_object':
+            x1, y1, x2, y2 = depth_roi
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
         for det in detections:
             x1, y1, x2, y2 = det.bbox_xyxy
             color = (0, 0, 255) if tuple(det.bbox_xyxy) in anomaly_boxes else (0, 255, 0)
@@ -186,6 +335,16 @@ class AnomalyDetectorNode(Node):
                 1,
                 cv2.LINE_AA,
             )
+        cv2.putText(
+            frame,
+            f'{category}: {detail}'[:110],
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255) if category != 'none' else (0, 180, 0),
+            2,
+            cv2.LINE_AA,
+        )
         return frame
 
 

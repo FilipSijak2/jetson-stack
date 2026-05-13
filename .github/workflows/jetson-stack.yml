@@ -1,0 +1,233 @@
+name: Jetson Stack
+
+on:
+  push:
+    branches: [devel]
+  pull_request:
+    branches: [devel]
+  workflow_dispatch:
+    inputs:
+      custom_tag:
+        description: Optional override for the version tag. Defaults to commit-derived vX.Y.rcN or dev-sha.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.repository }}-jetson-image
+  cancel-in-progress: false
+
+env:
+  IMAGE_BASE: jetson_anomaly
+  JETSON_HOST: 100.125.121.125
+  IMAGE_ARCHIVE: /tmp/jetson_anomaly_image.tar
+
+jobs:
+  validate:
+    name: Validate Jetson stack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate Docker Compose config
+        run: docker compose -f docker-compose.yaml config >/tmp/jetson-compose.yaml
+
+      - name: Validate Python syntax
+        run: python -m py_compile src/jetson_anomaly_detector/jetson_anomaly_detector/anomaly_detector_node.py
+
+      - name: Validate launch syntax
+        run: python -m py_compile src/jetson_anomaly_detector/launch/anomaly_detector.launch.py
+
+      - name: Validate topic contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          config = Path("config/anomaly_detector.yaml").read_text(encoding="utf-8")
+          node = Path(
+              "src/jetson_anomaly_detector/jetson_anomaly_detector/anomaly_detector_node.py"
+          ).read_text(encoding="utf-8")
+
+          assert "/jetson_ai/detections" in config
+          assert "/jetson_ai/anomaly_category" in config
+          assert "/ai_kit/obstacles" in config
+          assert "create_publisher" in node
+          assert "'/ai_kit/obstacles'" not in node
+          PY
+
+  build:
+    name: Build and Load Jetson image
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Read compose image tag
+        id: compose
+        run: |
+          set -e
+          IMAGE=$(python - <<'PY'
+          from pathlib import Path
+          import re
+
+          content = Path("docker-compose.yaml").read_text(encoding="utf-8")
+          match = re.search(r"(?m)^\s*image:\s*([^\s#]+)\s*$", content)
+          if not match:
+              raise SystemExit("docker-compose.yaml must define a direct service image tag")
+          image = match.group(1)
+          if "${" in image:
+              raise SystemExit("docker-compose.yaml image must be a direct tag, not an environment expression")
+          print(image)
+          PY
+          )
+          echo "Compose image: $IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare metadata
+        id: meta
+        run: |
+          set -e
+          OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMAGE_REPO="${OWNER_LC}/${IMAGE_BASE}"
+          echo "image_repo=$IMAGE_REPO" >> "$GITHUB_OUTPUT"
+          echo "base_name=$IMAGE_BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Determine version tag
+        id: version
+        env:
+          CUSTOM_TAG: ${{ github.event.inputs.custom_tag }}
+        run: |
+          set -e
+          if [ -n "$CUSTOM_TAG" ]; then
+            CLEAN="${CUSTOM_TAG//[^[:alnum:]_.-]/-}"
+            if ! echo "$CLEAN" | grep -qE '^[a-zA-Z0-9]'; then
+              CLEAN="v$CLEAN"
+            fi
+            echo "Using custom version tag: $CLEAN"
+            echo "version_tag=$CLEAN" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          MSG=$(git log -1 --pretty=%s || echo '')
+          echo "Commit message: $MSG"
+          VERSION=$(echo "$MSG" | grep -oE 'v[0-9]+(\.[0-9]+)*\.[Rr][Cc][0-9]+' | tail -n1 | tr '[:upper:]' '[:lower:]' || true)
+          if [ -z "$VERSION" ]; then
+            echo "No vX(.Y)*.rcN pattern found; falling back to short SHA"
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          CLEAN="${VERSION//[^a-z0-9_.-]/-}"
+          if ! echo "$CLEAN" | grep -qE '^[a-z0-9]'; then CLEAN="v$CLEAN"; fi
+          echo "Using version tag: $CLEAN"
+          echo "version_tag=$CLEAN" >> "$GITHUB_OUTPUT"
+
+      - name: Build PR image
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: false
+          tags: test/${{ steps.meta.outputs.image_repo }}:pr-${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}
+          cache-from: type=gha,scope=jetson-anomaly
+          cache-to: type=gha,scope=jetson-anomaly,mode=max
+
+      - name: Build Docker archive
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          outputs: type=docker,dest=${{ env.IMAGE_ARCHIVE }}
+          tags: |
+            ${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}
+            ${{ steps.compose.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.run_id }}
+          cache-from: type=gha,scope=jetson-anomaly
+          cache-to: type=gha,scope=jetson-anomaly,mode=max
+
+      - name: Connect to Tailscale
+        if: github.event_name != 'pull_request'
+        env:
+          TAILSCALE_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -e
+          if [ -z "$TAILSCALE_KEY" ]; then
+            echo "TAILSCALE_AUTHKEY secret is required to reach Jetson at ${JETSON_HOST}." >&2
+            exit 1
+          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey "$TAILSCALE_KEY" --hostname "gh-jetson-${GITHUB_RUN_ID}" --accept-routes --ssh --timeout 40s
+          sudo tailscale status || true
+
+      - name: Configure SSH
+        if: github.event_name != 'pull_request'
+        env:
+          SSH_USER: ${{ secrets.JETSON_SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JETSON_SSH_PRIVATE_KEY }}
+        run: |
+          set -e
+          if [ -z "$SSH_USER" ] || [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "JETSON_SSH_USER and JETSON_SSH_PRIVATE_KEY secrets are required for docker load on Jetson." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/jetson_key
+          chmod 600 ~/.ssh/jetson_key
+          ssh-keyscan -H "$JETSON_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "ssh_user=$SSH_USER" >> "$GITHUB_ENV"
+
+      - name: Check Jetson SSH connectivity
+        if: github.event_name != 'pull_request'
+        run: |
+          set -e
+          ssh -i ~/.ssh/jetson_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
+            'docker --version && uname -m'
+
+      - name: Copy image archive to Jetson
+        if: github.event_name != 'pull_request'
+        run: |
+          set -e
+          REMOTE_DIR="~/jetson-images"
+          REMOTE_FILE="jetson_anomaly-${{ steps.version.outputs.version_tag }}.tar"
+          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" "mkdir -p ${REMOTE_DIR}"
+          scp -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "$IMAGE_ARCHIVE" "${ssh_user}@${JETSON_HOST}:${REMOTE_DIR}/${REMOTE_FILE}"
+          echo "remote_archive=${REMOTE_DIR}/${REMOTE_FILE}" >> "$GITHUB_ENV"
+
+      - name: Load image on Jetson
+        if: github.event_name != 'pull_request'
+        run: |
+          set -e
+          GENERATED_IMAGE="${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}"
+          COMPOSE_IMAGE='${{ steps.compose.outputs.image }}'
+          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
+            "docker load -i ${remote_archive} && docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null"
+
+      - name: Summary
+        run: |
+          {
+            echo '## Jetson Image Build'
+            echo "Generated image: ${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}"
+            echo "Compose image: ${{ steps.compose.outputs.image }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ '${{ github.event_name }}' = 'pull_request' ]; then
+            echo 'PR build only - no Jetson load' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Loaded on Jetson: ${JETSON_HOST}" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,10 @@
+build/
+install/
+log/
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+models/*
+!models/
+!models/README.md

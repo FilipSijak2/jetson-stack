@@ -3,10 +3,16 @@
 # Start with mock mode to verify ROS 2 connectivity before installing ML dependencies.
 detector_backend: mock
 
-# Change this if the RealSense image topic differs in your robot stack.
+# RealSense inputs from the robot stack.
 image_topic: /camera/realsense/color/image_raw
+depth_topic: /camera/realsense/aligned_depth_to_color/image_raw
 
+# Jetson semantic outputs. Nav2 obstacle detection stays on the Hailo AI Kit
+# through /ai_kit/obstacles; this stack does not publish that topic.
 event_topic: /anomaly_events
+detections_topic: /jetson_ai/detections
+anomaly_category_topic: /jetson_ai/anomaly_category
+anomaly_detail_topic: /jetson_ai/anomaly_detail
 debug_image_topic: /anomaly/debug_image
 publish_debug_image: true
 
@@ -18,6 +24,13 @@ min_event_interval_s: 1.0
 # Simple first-pass heuristic: detections whose box bottom is in the lower part of the image
 # are treated as possible floor anomalies.
 floor_region_start_ratio: 0.55
+
+# Depth-based category for near objects in the center ROI. This is semantic
+# reporting only; Hailo remains responsible for Nav2 obstacle point clouds.
+enable_depth_anomaly: true
+near_obstacle_m: 0.55
+near_obstacle_min_ratio: 0.08
+center_roi_fraction: 0.45
 
 # YOLO mode settings. Used only when detector_backend: yolo
 model_path: yolov8n.pt
