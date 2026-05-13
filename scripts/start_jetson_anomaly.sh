@@ -4,6 +4,7 @@ set -euo pipefail
 : "${JETSON_DDS_INTERFACE:=tailscale0}"
 : "${CYCLONEDDS_URI:=file:///tmp/cyclonedds.xml}"
 : "${ROS_DOMAIN_ID:=0}"
+: "${JETSON_DDS_PARTICIPANT_INDEX:=0}"
 : "${ROBOT_TAILSCALE_IP:?Set ROBOT_TAILSCALE_IP to the Raspberry Pi Tailscale IP in .env or docker-compose.yaml}"
 
 if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
@@ -23,7 +24,7 @@ if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
       <Peers>
         <Peer Address="${ROBOT_TAILSCALE_IP}" />
       </Peers>
-      <ParticipantIndex>auto</ParticipantIndex>
+      <ParticipantIndex>${JETSON_DDS_PARTICIPANT_INDEX}</ParticipantIndex>
       <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
     </Discovery>
     <Tracing>
