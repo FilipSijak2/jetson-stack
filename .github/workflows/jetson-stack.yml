@@ -191,7 +191,16 @@ jobs:
           mkdir -p ~/.ssh
 
           if [ -n "$SSH_PRIVATE_KEY_B64" ]; then
-            printf '%s' "$SSH_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/jetson_key
+            if ! printf '%s' "$SSH_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/jetson_key 2>/tmp/jetson_key_b64.err; then
+              if [ -n "$SSH_PRIVATE_KEY" ]; then
+                echo "JETSON_SSH_PRIVATE_KEY_B64 is set but is not valid base64; falling back to JETSON_SSH_PRIVATE_KEY." >&2
+                printf '%s\n' "$SSH_PRIVATE_KEY" | sed 's/\r$//' > ~/.ssh/jetson_key
+              else
+                echo "JETSON_SSH_PRIVATE_KEY_B64 is set but is not valid base64, and JETSON_SSH_PRIVATE_KEY is empty." >&2
+                cat /tmp/jetson_key_b64.err >&2 || true
+                exit 1
+              fi
+            fi
           elif [ -n "$SSH_PRIVATE_KEY" ]; then
             printf '%s\n' "$SSH_PRIVATE_KEY" | sed 's/\r$//' > ~/.ssh/jetson_key
           else
@@ -235,7 +244,11 @@ jobs:
           GENERATED_IMAGE="${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}"
           COMPOSE_IMAGE='${{ steps.compose.outputs.image }}'
           ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
-            "docker load -i ${remote_archive} && docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null"
+            "docker load -i ${remote_archive} && docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null && rm -f ${remote_archive}"
+
+      - name: Cleanup local image archive
+        if: always() && github.event_name != 'pull_request'
+        run: rm -f "$IMAGE_ARCHIVE"
 
       - name: Summary
         run: |
