@@ -21,7 +21,7 @@ import yaml
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
 
@@ -39,7 +39,7 @@ class AnomalyDetectorNode(Node):
         config_file = self.get_parameter('config_file').get_parameter_value().string_value
         self.config = self._load_config(config_file)
 
-        self.image_topic = self.config.get('image_topic', '/camera/realsense/color/image_raw')
+        self.image_topic = self.config.get('image_topic', '/camera/realsense/color/image_compressed')
         self.depth_topic = self.config.get(
             'depth_topic',
             '/camera/realsense/aligned_depth_to_color/image_raw',
@@ -59,6 +59,7 @@ class AnomalyDetectorNode(Node):
         self.min_confidence = float(self.config.get('min_confidence', 0.35))
         self.inference_every_n_frames = max(1, int(self.config.get('inference_every_n_frames', 5)))
         self.publish_debug_image = bool(self.config.get('publish_debug_image', True))
+        self.image_is_compressed = self._topic_looks_compressed(self.image_topic)
         self.floor_region_start_ratio = float(self.config.get('floor_region_start_ratio', 0.55))
         self.anomaly_labels = set(self.config.get('anomaly_labels', ['bottle', 'cup', 'backpack', 'chair', 'person']))
         self.enable_depth_anomaly = bool(self.config.get('enable_depth_anomaly', True))
@@ -84,12 +85,16 @@ class AnomalyDetectorNode(Node):
         self.anomaly_category_pub = self.create_publisher(String, self.anomaly_category_topic, 10)
         self.anomaly_detail_pub = self.create_publisher(String, self.anomaly_detail_topic, 10)
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, 10) if self.publish_debug_image else None
-        self.image_sub = self.create_subscription(
-            Image,
-            self.image_topic,
-            self._on_image,
-            qos_profile_sensor_data,
-        )
+        image_msg_type = CompressedImage if self.image_is_compressed else Image
+        self.image_subs = [
+            self.create_subscription(
+                image_msg_type,
+                topic,
+                self._on_image,
+                qos_profile_sensor_data,
+            )
+            for topic in self._image_topic_candidates(self.image_topic)
+        ]
         self.depth_sub = None
         if self.enable_depth_anomaly:
             self.depth_sub = self.create_subscription(
@@ -100,6 +105,7 @@ class AnomalyDetectorNode(Node):
             )
         self.get_logger().info(
             f"Jetson anomaly detector started: backend={self.backend}, image_topic={self.image_topic}, "
+            f"image_topic_candidates={self._image_topic_candidates(self.image_topic)}, "
             f"event_topic={self.event_topic}, detections_topic={self.detections_topic}, "
             f"anomaly_category_topic={self.anomaly_category_topic}"
         )
@@ -128,13 +134,26 @@ class AnomalyDetectorNode(Node):
         self.get_logger().info(f'Loading YOLO model: {model_path}')
         self.yolo_model = YOLO(model_path)
 
-    def _on_image(self, msg: Image) -> None:
+    @staticmethod
+    def _topic_looks_compressed(topic: str) -> bool:
+        return topic.endswith('/compressed') or topic.endswith('/image_compressed')
+
+    @staticmethod
+    def _image_topic_candidates(topic: str) -> List[str]:
+        candidates = [topic]
+        if topic.endswith('/image_compressed'):
+            candidates.append(f"{topic[:-len('/image_compressed')]}/image_raw/compressed")
+        elif topic.endswith('/image_raw/compressed'):
+            candidates.append(f"{topic[:-len('/image_raw/compressed')]}/image_compressed")
+        return list(dict.fromkeys(candidates))
+
+    def _on_image(self, msg: Image | CompressedImage) -> None:
         self.frame_count += 1
         if self.frame_count % self.inference_every_n_frames != 0:
             return
 
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = self._image_msg_to_bgr(msg)
         except Exception as exc:
             self.get_logger().warn(f'Failed to convert image: {exc}')
             return
@@ -168,6 +187,15 @@ class AnomalyDetectorNode(Node):
             debug_msg = self.bridge.cv2_to_imgmsg(debug, encoding='bgr8')
             debug_msg.header = msg.header
             self.debug_pub.publish(debug_msg)
+
+    def _image_msg_to_bgr(self, msg: Image | CompressedImage):
+        if isinstance(msg, CompressedImage):
+            encoded = np.frombuffer(msg.data, dtype=np.uint8)
+            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+            if frame is None:
+                raise ValueError('OpenCV could not decode compressed image')
+            return frame
+        return self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
     def _on_depth(self, msg: Image) -> None:
         try:
