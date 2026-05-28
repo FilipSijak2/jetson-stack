@@ -122,6 +122,14 @@ After a successful push build, run on the Jetson:
 docker compose up -d
 ```
 
+To pull repository updates while keeping Jetson-local config untouched:
+
+```bash
+bash scripts/pull-unprotected.sh
+```
+
+Protected paths are listed in `scripts/protected-files.txt`.
+
 ## ROS 2 Over Tailscale
 
 ROS 2 discovery is handled by CycloneDDS static peers because multicast

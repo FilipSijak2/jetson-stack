@@ -1,0 +1,7 @@
+# One path per line, relative to repo root, for files you want to keep local.
+# Lines starting with # are comments.
+# Example: .env
+.env
+config/anomaly_detector.yaml
+models/
+scripts/protected-files.txt
