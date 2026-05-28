@@ -5,10 +5,14 @@ set -euo pipefail
 : "${CYCLONEDDS_URI:=file:///tmp/cyclonedds.xml}"
 : "${ROS_DOMAIN_ID:=0}"
 : "${JETSON_DDS_PARTICIPANT_INDEX:=0}"
+: "${JETSON_DDS_CLI_PARTICIPANT_INDEX:=1}"
 : "${ROBOT_TAILSCALE_IP:?Set ROBOT_TAILSCALE_IP to the Raspberry Pi Tailscale IP in .env or docker-compose.yaml}"
 
-if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
-  cat > /tmp/cyclonedds.xml <<XML
+render_cyclonedds_config() {
+  local output_file="$1"
+  local participant_index="$2"
+
+  cat > "${output_file}" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <CycloneDDS xmlns="https://cdds.omg.org/schema">
   <Domain id="any">
@@ -23,8 +27,9 @@ if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
     <Discovery>
       <Peers>
         <Peer Address="${ROBOT_TAILSCALE_IP}" />
+        <Peer Address="127.0.0.1" />
       </Peers>
-      <ParticipantIndex>${JETSON_DDS_PARTICIPANT_INDEX}</ParticipantIndex>
+      <ParticipantIndex>${participant_index}</ParticipantIndex>
       <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
     </Discovery>
     <Tracing>
@@ -34,12 +39,19 @@ if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
   </Domain>
 </CycloneDDS>
 XML
+}
+
+if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
+  render_cyclonedds_config /tmp/cyclonedds.xml "${JETSON_DDS_PARTICIPANT_INDEX}"
+  render_cyclonedds_config /tmp/cyclonedds-cli.xml "${JETSON_DDS_CLI_PARTICIPANT_INDEX}"
 fi
 
 echo "[jetson-anomaly] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 echo "[jetson-anomaly] CYCLONEDDS_URI=${CYCLONEDDS_URI}"
 echo "[jetson-anomaly] DDS interface=${JETSON_DDS_INTERFACE}"
 echo "[jetson-anomaly] Robot DDS peer=${ROBOT_TAILSCALE_IP}"
+echo "[jetson-anomaly] DDS participant index=${JETSON_DDS_PARTICIPANT_INDEX}"
+echo "[jetson-anomaly] CLI DDS participant index=${JETSON_DDS_CLI_PARTICIPANT_INDEX}"
 
 set +u
 # shellcheck disable=SC1091

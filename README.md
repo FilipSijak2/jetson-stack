@@ -15,7 +15,7 @@ The Jetson stack intentionally does not publish `/ai_kit/obstacles`.
 
 Inputs:
 
-- `/camera/realsense/color/image_compressed`
+- `/camera/realsense/color/image_raw`
 - `/camera/realsense/aligned_depth_to_color/image_raw`
 
 Outputs:
@@ -51,7 +51,7 @@ ros2 launch jetson_anomaly_detector anomaly_detector.launch.py config_file:=$PWD
 Check:
 
 ```bash
-ros2 topic hz /camera/realsense/color/image_compressed
+ros2 topic hz /camera/realsense/color/image_raw
 ros2 topic echo /anomaly_events
 ros2 topic echo /jetson_ai/anomaly_category
 ros2 topic echo /jetson_ai/detections
@@ -176,7 +176,7 @@ Quick checks on the Jetson:
 ```bash
 docker exec -it jetson_anomaly_cont bash
 ros2 topic list | grep realsense
-ros2 topic hz /camera/realsense/color/image_compressed
+ros2 topic hz /camera/realsense/color/image_raw
 ```
 
 ## Suggested next steps
