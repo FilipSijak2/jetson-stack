@@ -87,7 +87,10 @@ Jetson PyTorch wheels are sometimes JetPack-specific. If you already install
 NVIDIA's Jetson PyTorch manually, build with:
 
 ```bash
-docker compose build --build-arg INSTALL_ULTRALYTICS=false
+INSTALL_ULTRALYTICS=false docker compose \
+  -f docker-compose.yaml \
+  -f docker-compose.build.yaml \
+  build jetson_anomaly
 ```
 
 Then install YOLO dependencies inside your Jetson Python environment:
@@ -114,7 +117,16 @@ On the Jetson:
 
 ```bash
 cd jetson-stack
-docker compose up -d --build
+docker compose up -d
+```
+
+The runtime Compose file intentionally has no `build:` section. GitHub Actions
+builds and loads the image on Jetson; Compose only starts the loaded image. For
+manual local builds, use the build override:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml build jetson_anomaly
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d
 ```
 
 Local development without Compose:

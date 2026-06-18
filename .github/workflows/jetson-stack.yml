@@ -34,7 +34,9 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Validate Docker Compose config
-        run: docker compose -f docker-compose.yaml config >/tmp/jetson-compose.yaml
+        run: |
+          docker compose -f docker-compose.yaml config >/tmp/jetson-compose.yaml
+          docker compose -f docker-compose.yaml -f docker-compose.build.yaml config >/tmp/jetson-compose-build.yaml
 
       - name: Validate Python syntax
         run: |
@@ -58,6 +60,7 @@ jobs:
               "src/jetson_anomaly_detector/jetson_anomaly_detector/jetson_yolo_rosbridge_client.py"
           ).read_text(encoding="utf-8")
           compose = Path("docker-compose.yaml").read_text(encoding="utf-8")
+          build_compose = Path("docker-compose.build.yaml").read_text(encoding="utf-8")
           dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
           assert "/anomaly/events" in config
@@ -68,6 +71,8 @@ jobs:
           assert "JETSON_LOG_DIR=/workspace/logs" in env_file
           assert "env_file:" in compose
           assert "filebrowser/filebrowser" in compose
+          assert "build:" not in compose
+          assert "build:" in build_compose
           assert "docker-compose.yaml" in runtime_files
           assert "scripts/pull-unprotected.sh" in runtime_files
           assert "RosbridgeClient" in client

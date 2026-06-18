@@ -1,0 +1,7 @@
+services:
+  jetson_anomaly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_ULTRALYTICS: ${INSTALL_ULTRALYTICS:-true}

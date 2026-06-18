@@ -1,8 +1,5 @@
 services:
   jetson_anomaly:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: filipsijak2/jetson_anomaly:jetson_anomaly-dev-local
     container_name: jetson_anomaly_cont
     network_mode: host
