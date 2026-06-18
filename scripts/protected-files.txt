@@ -2,6 +2,7 @@
 # Lines starting with # are comments.
 # Example: .env
 .env
-config/anomaly_detector.yaml
+config/anomaly_rosbridge.yaml
+config/containers/jetson_anomaly.env
 models/
 scripts/protected-files.txt

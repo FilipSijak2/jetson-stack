@@ -9,3 +9,5 @@ venv/
 models/*
 !models/
 !models/README.md
+anomaly_logs/
+logs/

@@ -36,10 +36,9 @@ jobs:
         run: docker compose -f docker-compose.yaml config >/tmp/jetson-compose.yaml
 
       - name: Validate Python syntax
-        run: python -m py_compile src/jetson_anomaly_detector/jetson_anomaly_detector/anomaly_detector_node.py
-
-      - name: Validate launch syntax
-        run: python -m py_compile src/jetson_anomaly_detector/launch/anomaly_detector.launch.py
+        run: |
+          python -m py_compile src/jetson_anomaly_detector/setup.py
+          python -m compileall src/jetson_anomaly_detector/jetson_anomaly_detector
 
       - name: Validate shell scripts
         run: bash -n scripts/start_jetson_anomaly.sh
@@ -49,16 +48,26 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          config = Path("config/anomaly_detector.yaml").read_text(encoding="utf-8")
-          node = Path(
-              "src/jetson_anomaly_detector/jetson_anomaly_detector/anomaly_detector_node.py"
+          config = Path("config/anomaly_rosbridge.yaml").read_text(encoding="utf-8")
+          env_file = Path("config/containers/jetson_anomaly.env").read_text(encoding="utf-8")
+          client = Path(
+              "src/jetson_anomaly_detector/jetson_anomaly_detector/jetson_yolo_rosbridge_client.py"
           ).read_text(encoding="utf-8")
+          compose = Path("docker-compose.yaml").read_text(encoding="utf-8")
+          dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
-          assert "/jetson_ai/detections" in config
-          assert "/jetson_ai/anomaly_category" in config
-          assert "/ai_kit/obstacles" in config
-          assert "create_publisher" in node
-          assert "'/ai_kit/obstacles'" not in node
+          assert "/anomaly/events" in config
+          assert "/anomaly/markers" in config
+          assert "/anomaly/debug_image/compressed" in config
+          assert "/anomaly/map_snapshot/compressed" in config
+          assert "ROSBRIDGE_URL=ws://raspberry.local:9090" in env_file
+          assert "JETSON_LOG_DIR=/workspace/logs" in env_file
+          assert "env_file:" in compose
+          assert "filebrowser/filebrowser" in compose
+          assert "RosbridgeClient" in client
+          assert "rclpy" not in client
+          assert "CycloneDDS" not in dockerfile
+          assert "ros-humble" not in dockerfile
           PY
 
   build:

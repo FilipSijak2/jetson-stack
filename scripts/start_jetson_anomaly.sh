@@ -1,64 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${JETSON_DDS_INTERFACE:=tailscale0}"
-: "${CYCLONEDDS_URI:=file:///tmp/cyclonedds.xml}"
-: "${ROS_DOMAIN_ID:=0}"
-: "${JETSON_DDS_PARTICIPANT_INDEX:=0}"
-: "${JETSON_DDS_CLI_PARTICIPANT_INDEX:=1}"
-: "${ROBOT_TAILSCALE_IP:?Set ROBOT_TAILSCALE_IP to the Raspberry Pi Tailscale IP in .env or docker-compose.yaml}"
+: "${ANOMALY_CONFIG_FILE:=/workspace/config/anomaly_rosbridge.yaml}"
+: "${ROSBRIDGE_URL:=ws://raspberry.local:9090}"
+: "${CAMERA_TOPIC:=/camera/color/image/compressed}"
+: "${MAP_TOPIC:=/map}"
+: "${ROBOT_POSE_TOPIC:=/robot_pose_map}"
+: "${EVENT_TOPIC:=/anomaly/events}"
+: "${MARKER_TOPIC:=/anomaly/markers}"
+: "${DEBUG_IMAGE_TOPIC:=/anomaly/debug_image/compressed}"
+: "${MAP_SNAPSHOT_TOPIC:=/anomaly/map_snapshot/compressed}"
+: "${JETSON_ARTIFACT_ROOT:=/home/jetson/anomaly_logs}"
+: "${JETSON_LOG_DIR:=/workspace/logs}"
 
-render_cyclonedds_config() {
-  local output_file="$1"
-  local participant_index="$2"
+mkdir -p "${JETSON_ARTIFACT_ROOT}"
+mkdir -p "${JETSON_LOG_DIR}"
 
-  cat > "${output_file}" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<CycloneDDS xmlns="https://cdds.omg.org/schema">
-  <Domain id="any">
-    <General>
-      <Interfaces>
-        <NetworkInterface name="${JETSON_DDS_INTERFACE}" priority="default" multicast="false" />
-      </Interfaces>
-      <AllowMulticast>false</AllowMulticast>
-      <MaxMessageSize>65500B</MaxMessageSize>
-      <FragmentSize>4000B</FragmentSize>
-    </General>
-    <Discovery>
-      <Peers>
-        <Peer Address="${ROBOT_TAILSCALE_IP}" />
-        <Peer Address="127.0.0.1" />
-      </Peers>
-      <ParticipantIndex>${participant_index}</ParticipantIndex>
-      <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
-    </Discovery>
-    <Tracing>
-      <Verbosity>warning</Verbosity>
-      <OutputFile>stdout</OutputFile>
-    </Tracing>
-  </Domain>
-</CycloneDDS>
-XML
-}
+LOG_FILE="${JETSON_LOG_DIR}/jetson_anomaly_$(date -u '+%Y%m%d').log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
 
-if [[ "${CYCLONEDDS_URI}" == "file:///tmp/cyclonedds.xml" ]]; then
-  render_cyclonedds_config /tmp/cyclonedds.xml "${JETSON_DDS_PARTICIPANT_INDEX}"
-  render_cyclonedds_config /tmp/cyclonedds-cli.xml "${JETSON_DDS_CLI_PARTICIPANT_INDEX}"
-fi
+echo "[jetson-anomaly] Starting rosbridge YOLO client"
+echo "[jetson-anomaly] config=${ANOMALY_CONFIG_FILE}"
+echo "[jetson-anomaly] rosbridge=${ROSBRIDGE_URL}"
+echo "[jetson-anomaly] camera_topic=${CAMERA_TOPIC}"
+echo "[jetson-anomaly] map_topic=${MAP_TOPIC}"
+echo "[jetson-anomaly] robot_pose_topic=${ROBOT_POSE_TOPIC}"
+echo "[jetson-anomaly] event_topic=${EVENT_TOPIC}"
+echo "[jetson-anomaly] marker_topic=${MARKER_TOPIC}"
+echo "[jetson-anomaly] artifact_root=${JETSON_ARTIFACT_ROOT}"
+echo "[jetson-anomaly] log_file=${LOG_FILE}"
+echo "[jetson-anomaly] Jetson runs as a plain Python WebSocket client; no ROS 2 DDS runtime is used"
 
-echo "[jetson-anomaly] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
-echo "[jetson-anomaly] CYCLONEDDS_URI=${CYCLONEDDS_URI}"
-echo "[jetson-anomaly] DDS interface=${JETSON_DDS_INTERFACE}"
-echo "[jetson-anomaly] Robot DDS peer=${ROBOT_TAILSCALE_IP}"
-echo "[jetson-anomaly] DDS participant index=${JETSON_DDS_PARTICIPANT_INDEX}"
-echo "[jetson-anomaly] CLI DDS participant index=${JETSON_DDS_CLI_PARTICIPANT_INDEX}"
-
-set +u
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-# shellcheck disable=SC1091
-source /workspace/install/setup.bash
-set -u
-
-exec ros2 launch jetson_anomaly_detector anomaly_detector.launch.py \
-  config_file:=/workspace/config/anomaly_detector.yaml
+export PYTHONPATH="/workspace/src/jetson_anomaly_detector:${PYTHONPATH:-}"
+exec python3 -m jetson_anomaly_detector.jetson_yolo_rosbridge_client \
+  --config "${ANOMALY_CONFIG_FILE}"
