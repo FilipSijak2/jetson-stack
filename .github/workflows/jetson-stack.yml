@@ -22,6 +22,7 @@ concurrency:
 env:
   IMAGE_BASE: jetson_anomaly
   JETSON_HOST: ${{ vars.JETSON_HOST || '100.125.121.125' }}
+  JETSON_STACK_DIR: ${{ vars.JETSON_STACK_DIR || '~/jetson-stack' }}
   IMAGE_ARCHIVE: /tmp/jetson_anomaly_image.tar
 
 jobs:
@@ -41,7 +42,9 @@ jobs:
           python -m compileall src/jetson_anomaly_detector/jetson_anomaly_detector
 
       - name: Validate shell scripts
-        run: bash -n scripts/start_jetson_anomaly.sh
+        run: |
+          bash -n scripts/start_jetson_anomaly.sh
+          bash -n scripts/pull-unprotected.sh
 
       - name: Validate topic contract
         run: |
@@ -50,6 +53,7 @@ jobs:
 
           config = Path("config/anomaly_rosbridge.yaml").read_text(encoding="utf-8")
           env_file = Path("config/containers/jetson_anomaly.env").read_text(encoding="utf-8")
+          runtime_files = Path("scripts/runtime-files.txt").read_text(encoding="utf-8")
           client = Path(
               "src/jetson_anomaly_detector/jetson_anomaly_detector/jetson_yolo_rosbridge_client.py"
           ).read_text(encoding="utf-8")
@@ -64,6 +68,8 @@ jobs:
           assert "JETSON_LOG_DIR=/workspace/logs" in env_file
           assert "env_file:" in compose
           assert "filebrowser/filebrowser" in compose
+          assert "docker-compose.yaml" in runtime_files
+          assert "scripts/pull-unprotected.sh" in runtime_files
           assert "RosbridgeClient" in client
           assert "rclpy" not in client
           assert "CycloneDDS" not in dockerfile
@@ -258,6 +264,35 @@ jobs:
           ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
             "docker load -i ${remote_archive} && docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null && rm -f ${remote_archive}"
 
+      - name: Update Jetson runtime stack
+        if: github.event_name != 'pull_request'
+        env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -e
+          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
+            "JETSON_STACK_DIR='${JETSON_STACK_DIR}' DEPLOY_BRANCH='${DEPLOY_BRANCH:-devel}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          stack_dir="${JETSON_STACK_DIR:-~/jetson-stack}"
+          case "$stack_dir" in
+            "~") stack_dir="$HOME" ;;
+            "~/"*) stack_dir="$HOME/${stack_dir#"~/"}" ;;
+          esac
+
+          if [ ! -d "$stack_dir/.git" ]; then
+            echo "Jetson stack repository not found at: $stack_dir" >&2
+            echo "Clone it once on Jetson, or set the GitHub Actions variable JETSON_STACK_DIR." >&2
+            exit 1
+          fi
+
+          cd "$stack_dir"
+          bash scripts/pull-unprotected.sh origin "${DEPLOY_BRANCH:-devel}"
+          mkdir -p anomaly_logs logs
+          docker compose up -d --remove-orphans
+          docker compose ps
+          REMOTE
+
       - name: Cleanup local image archive
         if: always() && github.event_name != 'pull_request'
         run: rm -f "$IMAGE_ARCHIVE"
@@ -273,4 +308,5 @@ jobs:
             echo 'PR build only - no Jetson load' >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Loaded on Jetson: ${JETSON_HOST}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Updated stack dir: ${JETSON_STACK_DIR}" >> "$GITHUB_STEP_SUMMARY"
           fi

@@ -1,0 +1,16 @@
+# Files needed on the Jetson host to run the stack after GitHub Actions has
+# built and loaded the Docker image.
+#
+# Local machine-specific files are still protected by scripts/protected-files.txt.
+
+docker-compose.yaml
+.env.example
+README.md
+
+config/anomaly_rosbridge.yaml
+config/containers/jetson_anomaly.env
+
+scripts/pull-unprotected.sh
+scripts/protected-files.txt
+scripts/runtime-files.txt
+

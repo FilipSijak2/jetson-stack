@@ -125,6 +125,54 @@ python3 -m jetson_anomaly_detector.jetson_yolo_rosbridge_client \
   --config config/anomaly_rosbridge.yaml
 ```
 
+## Automated Deploy
+
+GitHub Actions deploys from `devel`:
+
+1. validates Compose, Python, shell scripts, and the topic contract
+2. builds the `linux/arm64` Docker image
+3. copies the Docker archive to Jetson over Tailscale SSH
+4. runs `docker load` on Jetson
+5. runs `scripts/pull-unprotected.sh origin devel` on Jetson
+6. starts the runtime stack with `docker compose up -d --remove-orphans`
+
+One-time Jetson setup:
+
+```bash
+cd ~
+git clone <repo-url> jetson-stack
+cd jetson-stack
+cp .env.example .env
+mkdir -p anomaly_logs logs
+```
+
+Keep Jetson-specific runtime config local:
+
+```text
+.env
+config/anomaly_rosbridge.yaml
+config/containers/jetson_anomaly.env
+models/
+```
+
+Those paths are protected by `scripts/protected-files.txt`.
+
+GitHub repository secrets:
+
+- `TAILSCALE_AUTHKEY`
+- `JETSON_SSH_USER`
+- `JETSON_SSH_PRIVATE_KEY_B64` or `JETSON_SSH_PRIVATE_KEY`
+
+GitHub repository variables:
+
+- `JETSON_HOST`, default `100.125.121.125`
+- `JETSON_STACK_DIR`, default `~/jetson-stack`
+
+`scripts/pull-unprotected.sh` only updates files listed in
+`scripts/runtime-files.txt`, and it skips protected files when they already
+exist locally. This means a deploy updates the Compose/runtime wrapper without
+overwriting Jetson-local topics, rosbridge URL, YOLO model path, or artifacts.
+
 ## Event JSON
 
 Example `/anomaly/events` payload:
