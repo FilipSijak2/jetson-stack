@@ -76,6 +76,15 @@ def _decode_int8_array(data: Any) -> np.ndarray:
     raise ValueError(f"Unsupported int8[] payload type: {type(data)!r}")
 
 
+def _float_or_default(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_occupancy_grid(msg: Dict[str, Any]) -> OccupancyGridMap:
     info = msg.get("info") or {}
     width = int(info.get("width", 0))
@@ -106,16 +115,16 @@ def parse_laser_scan(msg: Dict[str, Any]) -> LaserScan:
     ranges_raw = msg.get("ranges", [])
     if not isinstance(ranges_raw, list):
         raise ValueError(f"Unsupported LaserScan ranges payload type: {type(ranges_raw)!r}")
-    ranges = np.asarray([float(value) for value in ranges_raw], dtype=np.float32)
-    angle_min = float(msg.get("angle_min", 0.0))
-    angle_increment = float(msg.get("angle_increment", 0.0))
-    angle_max = float(msg.get("angle_max", angle_min + angle_increment * max(0, ranges.size - 1)))
+    ranges = np.asarray([_float_or_default(value, float("nan")) for value in ranges_raw], dtype=np.float32)
+    angle_min = _float_or_default(msg.get("angle_min"), 0.0)
+    angle_increment = _float_or_default(msg.get("angle_increment"), 0.0)
+    angle_max = _float_or_default(msg.get("angle_max"), angle_min + angle_increment * max(0, ranges.size - 1))
     return LaserScan(
         angle_min=angle_min,
         angle_max=angle_max,
         angle_increment=angle_increment,
-        range_min=float(msg.get("range_min", 0.0)),
-        range_max=float(msg.get("range_max", float("inf"))),
+        range_min=_float_or_default(msg.get("range_min"), 0.0),
+        range_max=_float_or_default(msg.get("range_max"), float("inf")),
         ranges=ranges,
     )
 
