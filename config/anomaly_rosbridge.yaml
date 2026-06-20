@@ -6,8 +6,10 @@ rosbridge_url: ws://raspberry.local:9090
 camera_topic: /camera/color/image/compressed
 map_topic: /map
 robot_pose_topic: /robot_pose_map
+scan_topic: /scan
 
 event_topic: /anomaly/events
+readable_event_topic: /anomaly/events/readable
 marker_topic: /anomaly/markers
 debug_image_topic: /anomaly/debug_image/compressed
 map_snapshot_topic: /anomaly/map_snapshot/compressed
@@ -21,13 +23,25 @@ confidence_threshold: 0.5
 detection_cooldown_s: 5.0
 marker_ttl_s: 180.0
 marker_republish_hz: 1.0
+cluster_merge_radius_m: 0.20
 
 default_anomaly_distance_m: 1.5
 camera_horizontal_fov_deg: 69.0
+camera_yaw_offset_deg: 0.0
+use_laser_distance: true
+laser_window_deg: 6.0
+laser_min_distance_m: 0.10
+laser_max_distance_m: 4.0
 
 yolo_model_path: yolov8n.pt
 mock_mode: false
 inference_every_n_frames: 1
 reconnect_delay_s: 3.0
 jpeg_quality: 85
+save_per_event_images: false
+daily_map_summary: true
+daily_map_summary_topic_publish: true
+debug_image_always_stream: true
+debug_image_on_detection: true
+debug_image_publish_hz: 2.0
 map_frame_id: map

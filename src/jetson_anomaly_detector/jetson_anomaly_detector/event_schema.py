@@ -21,10 +21,14 @@ def build_event(
     detection: Detection,
     robot_pose: RobotPoseMap,
     object_pose: ObjectPoseMap,
+    cluster_id: str,
+    cluster_count: int,
+    cluster_merge_radius_m: float,
     ttl_sec: float,
-    original_image: Path,
-    annotated_image: Path,
+    original_image: Optional[Path],
+    annotated_image: Optional[Path],
     map_snapshot: Optional[Path],
+    daily_map_summary: Optional[Path],
     event_log: Path,
 ) -> Dict[str, Any]:
     return {
@@ -38,13 +42,50 @@ def build_event(
         "bbox_xyxy": [int(value) for value in detection.bbox_xyxy],
         "robot_pose_map": pose_to_dict(robot_pose),
         "object_pose_map": object_pose_to_dict(object_pose),
+        "cluster": {
+            "id": cluster_id,
+            "count": int(cluster_count),
+            "merge_radius_m": round(float(cluster_merge_radius_m), 3),
+        },
         "jetson_files": {
-            "original_image": str(original_image),
-            "annotated_image": str(annotated_image),
+            "original_image": str(original_image) if original_image else None,
+            "annotated_image": str(annotated_image) if annotated_image else None,
             "map_snapshot": str(map_snapshot) if map_snapshot else None,
+            "daily_map_summary": str(daily_map_summary) if daily_map_summary else None,
             "event_log": str(event_log),
         },
     }
+
+
+def build_readable_event(event: Dict[str, Any]) -> str:
+    robot_pose = event.get("robot_pose_map") or {}
+    object_pose = event.get("object_pose_map") or {}
+    cluster = event.get("cluster") or {}
+    files = event.get("jetson_files") or {}
+    bbox = event.get("bbox_xyxy") or []
+
+    lines = [
+        f"Anomaly {event.get('id', '-')}",
+        f"time: {event.get('timestamp', '-')}",
+        f"label: {event.get('label', '-')}  confidence: {float(event.get('confidence', 0.0)):.2f}",
+        f"cluster: {cluster.get('id', '-')}  count: {cluster.get('count', 1)}  radius_m: {cluster.get('merge_radius_m', '-')}",
+        (
+            "object_map: "
+            f"x={float(object_pose.get('x', 0.0)):.2f} "
+            f"y={float(object_pose.get('y', 0.0)):.2f} "
+            f"z={float(object_pose.get('z', 0.0)):.2f}"
+        ),
+        (
+            "robot_map: "
+            f"x={float(robot_pose.get('x', 0.0)):.2f} "
+            f"y={float(robot_pose.get('y', 0.0)):.2f} "
+            f"yaw={float(robot_pose.get('yaw', 0.0)):.2f}"
+        ),
+        f"bbox_xyxy: {bbox}",
+        f"daily_map: {files.get('daily_map_summary') or files.get('map_snapshot') or '-'}",
+        f"event_log: {files.get('event_log', '-')}",
+    ]
+    return "\n".join(lines)
 
 
 class EventJsonlWriter:

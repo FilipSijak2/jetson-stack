@@ -24,10 +24,12 @@ Jetson subscribes through rosbridge:
 - `/map` (`nav_msgs/OccupancyGrid`)
 - `/robot_pose_map` (`geometry_msgs/PoseStamped`) or `/amcl_pose`
   (`geometry_msgs/PoseWithCovarianceStamped`) when configured
+- `/scan` (`sensor_msgs/LaserScan`) when laser distance localization is enabled
 
 Jetson publishes back through rosbridge:
 
 - `/anomaly/events` (`std_msgs/String`, JSON)
+- `/anomaly/events/readable` (`std_msgs/String`, human-readable summary)
 - `/anomaly/markers` (`visualization_msgs/MarkerArray`, frame `map`)
 - `/anomaly/debug_image/compressed` (`sensor_msgs/CompressedImage`)
 - `/anomaly/map_snapshot/compressed` (`sensor_msgs/CompressedImage`)
@@ -51,13 +53,23 @@ ROSBRIDGE_URL=ws://raspberry.local:9090
 CAMERA_TOPIC=/camera/color/image/compressed
 MAP_TOPIC=/map
 ROBOT_POSE_TOPIC=/robot_pose_map
+SCAN_TOPIC=/scan
+USE_LASER_DISTANCE=1
+LASER_WINDOW_DEG=6
 ANOMALY_CLASSES=bottle
 CONFIDENCE_THRESHOLD=0.5
 DETECTION_COOLDOWN_S=5
+CLUSTER_MERGE_RADIUS_M=0.20
+SAVE_PER_EVENT_IMAGES=0
+DAILY_MAP_SUMMARY=1
+DEBUG_IMAGE_ALWAYS_STREAM=1
+DEBUG_IMAGE_ON_DETECTION=1
+DEBUG_IMAGE_PUBLISH_HZ=2
 MARKER_TTL_S=180
 MARKER_REPUBLISH_HZ=1
 DEFAULT_ANOMALY_DISTANCE_M=1.5
 CAMERA_HORIZONTAL_FOV_DEG=69
+CAMERA_YAW_OFFSET_DEG=0
 YOLO_MODEL_PATH=yolov8n.pt
 JETSON_ARTIFACT_ROOT=/home/jetson/anomaly_logs
 JETSON_LOG_DIR=/workspace/logs
@@ -66,6 +78,17 @@ JETSON_LOG_DIR=/workspace/logs
 The structured YAML defaults live in `config/anomaly_rosbridge.yaml`.
 Environment variables from `config/containers/jetson_anomaly.env` override the
 YAML values.
+
+When `/scan` is available, Jetson uses the laser range around the detected
+bounding-box bearing to place the anomaly on the map. If no valid scan range is
+available, it falls back to `DEFAULT_ANOMALY_DISTANCE_M`.
+
+Detections with the same label within `CLUSTER_MERGE_RADIUS_M` are merged into
+one map square and marker text shows the observed count, for example
+`bottle x3`. By default Jetson does not save original/annotated camera images
+for every event; it keeps a daily map summary at
+`/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` and
+updates it as new anomaly clusters are detected.
 
 If your active RealSense compressed topic is namespaced differently, set for
 example:
@@ -201,21 +224,28 @@ Example `/anomaly/events` payload:
   "bbox_xyxy": [312, 210, 390, 420],
   "robot_pose_map": {"x": 1.52, "y": -0.48, "yaw": 1.31},
   "object_pose_map": {"x": 2.10, "y": -0.92, "z": 0.0},
+  "cluster": {"id": "cluster_00003", "count": 2, "merge_radius_m": 0.2},
   "jetson_files": {
-    "original_image": "/home/jetson/anomaly_logs/images/original/anom_00042_bottle.jpg",
-    "annotated_image": "/home/jetson/anomaly_logs/images/annotated/anom_00042_bottle.jpg",
-    "map_snapshot": "/home/jetson/anomaly_logs/map_images/anom_00042_bottle_map.png",
+    "original_image": null,
+    "annotated_image": null,
+    "map_snapshot": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
+    "daily_map_summary": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
     "event_log": "/home/jetson/anomaly_logs/events.jsonl"
   }
 }
 ```
 
+For Foxglove, use `/anomaly/events/readable` when you want a compact
+human-readable event summary. Keep `/anomaly/events` for machine parsing and
+bag analysis.
+
 ## Saved Artifacts
 
 Jetson writes:
 
-- original frames: `/home/jetson/anomaly_logs/images/original/`
-- annotated frames: `/home/jetson/anomaly_logs/images/annotated/`
+- optional original frames: `/home/jetson/anomaly_logs/images/original/`
+- optional annotated frames: `/home/jetson/anomaly_logs/images/annotated/`
+- daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`
 

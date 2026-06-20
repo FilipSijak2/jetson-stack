@@ -28,6 +28,14 @@ class ObjectPoseMap:
 
 
 @dataclass(frozen=True)
+class AnomalyClusterSummary:
+    cluster_id: str
+    label: str
+    object_pose: ObjectPoseMap
+    count: int
+
+
+@dataclass(frozen=True)
 class OccupancyGridMap:
     width: int
     height: int
@@ -36,4 +44,14 @@ class OccupancyGridMap:
     origin_y: float
     frame_id: str
     data: np.ndarray
+
+
+@dataclass(frozen=True)
+class LaserScan:
+    angle_min: float
+    angle_max: float
+    angle_increment: float
+    range_min: float
+    range_max: float
+    ranges: np.ndarray
 

@@ -1,100 +1,140 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .models import ObjectPoseMap
+from .models import AnomalyClusterSummary, ObjectPoseMap
 from .ros_messages import ros_time_now
 
 
 MARKER_ADD = 0
 MARKER_DELETE = 2
-MARKER_SPHERE = 2
+MARKER_CUBE = 1
 MARKER_TEXT_VIEW_FACING = 9
 
 
 @dataclass
-class ActiveMarker:
-    event_id: str
+class ActiveCluster:
+    cluster_id: str
     marker_base_id: int
     label: str
     object_pose: ObjectPoseMap
+    count: int
     expires_at: float
     ttl_s: float
 
 
 class MarkerManager:
-    def __init__(self, frame_id: str = "map") -> None:
+    def __init__(self, frame_id: str = "map", merge_radius_m: float = 0.20) -> None:
         self.frame_id = frame_id
-        self.active: Dict[str, ActiveMarker] = {}
+        self.merge_radius_m = merge_radius_m
+        self.active: Dict[str, ActiveCluster] = {}
         self.delete_queue: List[int] = []
+        self.next_marker_base_id = 2
+        self.next_cluster_index = 1
 
-    def add(self, event_id: str, marker_base_id: int, label: str, object_pose: ObjectPoseMap, ttl_s: float) -> None:
-        self.active[event_id] = ActiveMarker(
-            event_id=event_id,
-            marker_base_id=marker_base_id,
-            label=label,
-            object_pose=object_pose,
-            expires_at=time.monotonic() + ttl_s,
-            ttl_s=ttl_s,
-        )
+    def add_or_update(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        observed_count: int,
+        ttl_s: float,
+    ) -> AnomalyClusterSummary:
+        cluster = self._nearest_cluster(label, object_pose)
+        if cluster is None:
+            cluster = ActiveCluster(
+                cluster_id=f"cluster_{self.next_cluster_index:05d}",
+                marker_base_id=self.next_marker_base_id,
+                label=label,
+                object_pose=object_pose,
+                count=max(1, observed_count),
+                expires_at=time.monotonic() + ttl_s,
+                ttl_s=ttl_s,
+            )
+            self.next_cluster_index += 1
+            self.next_marker_base_id += 2
+            self.active[cluster.cluster_id] = cluster
+        else:
+            cluster.object_pose = self._blend_pose(cluster.object_pose, object_pose)
+            cluster.count = max(cluster.count, observed_count)
+            cluster.expires_at = time.monotonic() + ttl_s
+            cluster.ttl_s = ttl_s
+
+        return self._summary(cluster)
 
     def build_marker_array(self) -> Dict[str, Any]:
         self._expire_old_markers()
         markers = []
         stamp = ros_time_now()
-        for marker in self.active.values():
-            markers.append(self._object_marker(marker, stamp))
-            markers.append(self._text_marker(marker, stamp))
+        for cluster in self.active.values():
+            markers.append(self._object_marker(cluster, stamp))
+            markers.append(self._text_marker(cluster, stamp))
         while self.delete_queue:
             marker_id = self.delete_queue.pop(0)
             markers.append(self._delete_marker(marker_id, stamp))
         return {"markers": markers}
 
+    def summaries(self) -> List[AnomalyClusterSummary]:
+        return [self._summary(cluster) for cluster in self.active.values()]
+
+    def _nearest_cluster(self, label: str, object_pose: ObjectPoseMap) -> Optional[ActiveCluster]:
+        nearest = None
+        nearest_distance = float("inf")
+        for cluster in self.active.values():
+            if cluster.label != label:
+                continue
+            distance = math.hypot(cluster.object_pose.x - object_pose.x, cluster.object_pose.y - object_pose.y)
+            if distance <= self.merge_radius_m and distance < nearest_distance:
+                nearest = cluster
+                nearest_distance = distance
+        return nearest
+
     def _expire_old_markers(self) -> None:
         now = time.monotonic()
-        expired = [event_id for event_id, marker in self.active.items() if marker.expires_at <= now]
-        for event_id in expired:
-            marker = self.active.pop(event_id)
-            self.delete_queue.extend([marker.marker_base_id, marker.marker_base_id + 1])
+        expired = [cluster_id for cluster_id, cluster in self.active.items() if cluster.expires_at <= now]
+        for cluster_id in expired:
+            cluster = self.active.pop(cluster_id)
+            self.delete_queue.extend([cluster.marker_base_id, cluster.marker_base_id + 1])
 
-    def _base(self, marker: ActiveMarker, marker_id: int, marker_type: int, stamp: Dict[str, int]) -> Dict[str, Any]:
+    def _base(self, cluster: ActiveCluster, marker_id: int, marker_type: int, stamp: Dict[str, int]) -> Dict[str, Any]:
         return {
             "header": {"stamp": stamp, "frame_id": self.frame_id},
-            "ns": "jetson_anomalies",
+            "ns": "jetson_anomaly_clusters",
             "id": marker_id,
             "type": marker_type,
             "action": MARKER_ADD,
             "pose": {
                 "position": {
-                    "x": marker.object_pose.x,
-                    "y": marker.object_pose.y,
-                    "z": marker.object_pose.z,
+                    "x": cluster.object_pose.x,
+                    "y": cluster.object_pose.y,
+                    "z": cluster.object_pose.z,
                 },
                 "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
             },
-            "lifetime": {"sec": int(marker.ttl_s), "nanosec": int((marker.ttl_s % 1.0) * 1_000_000_000)},
+            "lifetime": {"sec": int(cluster.ttl_s), "nanosec": int((cluster.ttl_s % 1.0) * 1_000_000_000)},
         }
 
-    def _object_marker(self, marker: ActiveMarker, stamp: Dict[str, int]) -> Dict[str, Any]:
-        msg = self._base(marker, marker.marker_base_id, MARKER_SPHERE, stamp)
+    def _object_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
+        msg = self._base(cluster, cluster.marker_base_id, MARKER_CUBE, stamp)
+        side = max(0.20, self.merge_radius_m * 2.0)
         msg.update(
             {
-                "scale": {"x": 0.22, "y": 0.22, "z": 0.22},
-                "color": {"r": 1.0, "g": 0.05, "b": 0.0, "a": 1.0},
+                "scale": {"x": side, "y": side, "z": 0.08},
+                "color": {"r": 1.0, "g": 0.05, "b": 0.0, "a": 0.75},
             }
         )
         return msg
 
-    def _text_marker(self, marker: ActiveMarker, stamp: Dict[str, int]) -> Dict[str, Any]:
-        msg = self._base(marker, marker.marker_base_id + 1, MARKER_TEXT_VIEW_FACING, stamp)
-        msg["pose"]["position"]["z"] = marker.object_pose.z + 0.45
+    def _text_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
+        msg = self._base(cluster, cluster.marker_base_id + 1, MARKER_TEXT_VIEW_FACING, stamp)
+        msg["pose"]["position"]["z"] = cluster.object_pose.z + 0.35
         msg.update(
             {
-                "scale": {"x": 0.0, "y": 0.0, "z": 0.25},
+                "scale": {"x": 0.0, "y": 0.0, "z": 0.20},
                 "color": {"r": 1.0, "g": 0.1, "b": 0.0, "a": 1.0},
-                "text": f"ANOMALY: {marker.label}",
+                "text": self._label_text(cluster),
             }
         )
         return msg
@@ -102,9 +142,9 @@ class MarkerManager:
     def _delete_marker(self, marker_id: int, stamp: Dict[str, int]) -> Dict[str, Any]:
         return {
             "header": {"stamp": stamp, "frame_id": self.frame_id},
-            "ns": "jetson_anomalies",
+            "ns": "jetson_anomaly_clusters",
             "id": marker_id,
-            "type": MARKER_SPHERE,
+            "type": MARKER_CUBE,
             "action": MARKER_DELETE,
             "pose": {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -115,3 +155,22 @@ class MarkerManager:
             "lifetime": {"sec": 0, "nanosec": 0},
         }
 
+    def _summary(self, cluster: ActiveCluster) -> AnomalyClusterSummary:
+        return AnomalyClusterSummary(
+            cluster_id=cluster.cluster_id,
+            label=cluster.label,
+            object_pose=cluster.object_pose,
+            count=cluster.count,
+        )
+
+    def _blend_pose(self, current: ObjectPoseMap, new_pose: ObjectPoseMap) -> ObjectPoseMap:
+        return ObjectPoseMap(
+            x=(current.x + new_pose.x) * 0.5,
+            y=(current.y + new_pose.y) * 0.5,
+            z=(current.z + new_pose.z) * 0.5,
+        )
+
+    def _label_text(self, cluster: ActiveCluster) -> str:
+        if cluster.count <= 1:
+            return cluster.label
+        return f"{cluster.label} x{cluster.count}"

@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import cv2
 import numpy as np
 
-from .models import OccupancyGridMap, RobotPoseMap
+from .models import LaserScan, OccupancyGridMap, RobotPoseMap
 
 
 def ros_time_now() -> Dict[str, int]:
@@ -99,6 +99,24 @@ def parse_occupancy_grid(msg: Dict[str, Any]) -> OccupancyGridMap:
         origin_y=float(position.get("y", 0.0)),
         frame_id=str(frame_id),
         data=data.reshape((height, width)),
+    )
+
+
+def parse_laser_scan(msg: Dict[str, Any]) -> LaserScan:
+    ranges_raw = msg.get("ranges", [])
+    if not isinstance(ranges_raw, list):
+        raise ValueError(f"Unsupported LaserScan ranges payload type: {type(ranges_raw)!r}")
+    ranges = np.asarray([float(value) for value in ranges_raw], dtype=np.float32)
+    angle_min = float(msg.get("angle_min", 0.0))
+    angle_increment = float(msg.get("angle_increment", 0.0))
+    angle_max = float(msg.get("angle_max", angle_min + angle_increment * max(0, ranges.size - 1)))
+    return LaserScan(
+        angle_min=angle_min,
+        angle_max=angle_max,
+        angle_increment=angle_increment,
+        range_min=float(msg.get("range_min", 0.0)),
+        range_max=float(msg.get("range_max", float("inf"))),
+        ranges=ranges,
     )
 
 
