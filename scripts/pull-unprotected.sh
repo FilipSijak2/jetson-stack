@@ -85,6 +85,7 @@ fi
 
 if ! git fetch "$REMOTE" "$BRANCH"; then
 	echo "git fetch failed: $REMOTE $BRANCH" >&2
+	echo "Hint: if this is a private HTTPS remote, configure Git credentials on Jetson or run via the GitHub Actions deploy workflow." >&2
 	exit 2
 fi
 

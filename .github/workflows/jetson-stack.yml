@@ -273,10 +273,26 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           DEPLOY_BRANCH: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -e
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "GITHUB_TOKEN is required to fetch the private repo from Jetson." >&2
+            exit 1
+          fi
+          AUTH_B64=$(python3 - <<'PY'
+          import base64
+          import os
+
+          token = os.environ["GITHUB_TOKEN"]
+          print(base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii"))
+          PY
+          )
+          GIT_EXTRAHEADER="AUTHORIZATION: basic ${AUTH_B64}"
+          echo "::add-mask::${AUTH_B64}"
+          echo "::add-mask::${GIT_EXTRAHEADER}"
           ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
-            "JETSON_STACK_DIR='${JETSON_STACK_DIR}' DEPLOY_BRANCH='${DEPLOY_BRANCH:-devel}' bash -s" <<'REMOTE'
+            "JETSON_STACK_DIR='${JETSON_STACK_DIR}' DEPLOY_BRANCH='${DEPLOY_BRANCH:-devel}' GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' GIT_CONFIG_VALUE_0='${GIT_EXTRAHEADER}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           stack_dir="${JETSON_STACK_DIR:-~/jetson-stack}"
