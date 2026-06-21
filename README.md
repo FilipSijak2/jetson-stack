@@ -129,6 +129,15 @@ docker compose -f docker-compose.yaml -f docker-compose.build.yaml build jetson_
 docker compose up -d --force-recreate jetson_anomaly
 ```
 
+The YOLO/PyTorch image downloads several large Jetson CUDA wheels. If the build
+fails with `No space left on device`, clean Docker's local build cache first:
+
+```bash
+docker builder prune -af
+docker system prune -af --volumes
+df -h
+```
+
 Verify the container sees CUDA:
 
 ```bash
