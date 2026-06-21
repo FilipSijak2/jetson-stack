@@ -37,6 +37,7 @@ ARG TORCH_VERSION=2.8.0
 ARG TORCHVISION_VERSION=0.23.0
 ARG CUDSS_VERSION=0.5.0.16
 ARG CUSPARSELT_VERSION=0.7.1
+ARG SYMPY_VERSION=1.13.3
 ARG ULTRALYTICS_VERSION=8.3.40
 RUN python3 -m pip install --no-cache-dir -r /workspace/requirements-rosbridge.txt
 
@@ -55,10 +56,16 @@ RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
         networkx \
         packaging \
         py-cpuinfo \
-        sympy \
         typing_extensions; \
     else \
     echo "[jetson-anomaly] Skipping YOLO base deps (INSTALL_ULTRALYTICS=false)"; \
+    fi
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
+    python3 -m pip install --no-cache-dir --ignore-installed "sympy==${SYMPY_VERSION}" && \
+    python3 -c "import sympy; from sympy.core.numbers import equal_valued; print(f'[jetson-anomaly] sympy {sympy.__version__} from {sympy.__file__}; equal_valued OK')"; \
+    else \
+    echo "[jetson-anomaly] Skipping SymPy compatibility pin (INSTALL_ULTRALYTICS=false)"; \
     fi
 
 RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
