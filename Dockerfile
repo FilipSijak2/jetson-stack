@@ -35,10 +35,18 @@ ARG INSTALL_ULTRALYTICS=true
 ARG PYTORCH_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/
 ARG TORCH_VERSION=2.8.0
 ARG TORCHVISION_VERSION=0.23.0
+ARG CUDSS_VERSION=0.5.0.16
+ARG CUSPARSELT_VERSION=0.7.1
 ARG ULTRALYTICS_VERSION=8.3.40
-RUN python3 -m pip install --no-cache-dir -r /workspace/requirements-rosbridge.txt && \
-    if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
-    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+RUN python3 -m pip install --no-cache-dir -r /workspace/requirements-rosbridge.txt
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
+    else \
+    echo "[jetson-anomaly] Skipping pip toolchain upgrade (INSTALL_ULTRALYTICS=false)"; \
+    fi
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
     python3 -m pip install --no-cache-dir \
         numpy==1.26.1 \
         filelock \
@@ -48,8 +56,15 @@ RUN python3 -m pip install --no-cache-dir -r /workspace/requirements-rosbridge.t
         packaging \
         py-cpuinfo \
         sympy \
-        typing_extensions && \
-    python3 -m pip install --no-cache-dir nvidia-cudss-cu12 nvidia-cusparselt-cu12 && \
+        typing_extensions; \
+    else \
+    echo "[jetson-anomaly] Skipping YOLO base deps (INSTALL_ULTRALYTICS=false)"; \
+    fi
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
+    python3 -m pip install --no-cache-dir --no-deps \
+        "nvidia-cudss-cu12==${CUDSS_VERSION}" \
+        "nvidia-cusparselt-cu12==${CUSPARSELT_VERSION}" && \
     (python3 -m pip uninstall -y \
         nvidia-cublas-cu12 \
         nvidia-cuda-runtime-cu12 \
@@ -60,12 +75,22 @@ RUN python3 -m pip install --no-cache-dir -r /workspace/requirements-rosbridge.t
         "${NVIDIA_PYTHON_LIBS}/cudss/lib" \
         "${NVIDIA_PYTHON_LIBS}/cusparselt/lib" \
         > /etc/ld.so.conf.d/nvidia-pip-libs.conf && \
-    ldconfig && \
+    ldconfig; \
+    else \
+    echo "[jetson-anomaly] Skipping NVIDIA Python CUDA helper libs (INSTALL_ULTRALYTICS=false)"; \
+    fi
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
     python3 -m pip install --no-cache-dir \
         --no-deps \
         --index-url "${PYTORCH_INDEX_URL}" \
         "torch==${TORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" && \
+        "torchvision==${TORCHVISION_VERSION}"; \
+    else \
+    echo "[jetson-anomaly] Skipping Jetson PyTorch install (INSTALL_ULTRALYTICS=false)"; \
+    fi
+
+RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
     python3 -m pip install --no-cache-dir --no-deps \
         -r /workspace/requirements-yolo.txt \
         "ultralytics==${ULTRALYTICS_VERSION}"; \
