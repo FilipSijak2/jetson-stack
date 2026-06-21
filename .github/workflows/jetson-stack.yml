@@ -259,24 +259,28 @@ jobs:
           ssh -i ~/.ssh/jetson_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
             'docker --version && uname -m'
 
-      - name: Copy image archive to Jetson
+      - name: Prepare Jetson disk for image load
         if: github.event_name != 'pull_request'
         run: |
           set -e
-          REMOTE_DIR="~/jetson-images"
-          REMOTE_FILE="jetson_anomaly-${{ steps.version.outputs.version_tag }}.tar"
-          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" "mkdir -p ${REMOTE_DIR}"
-          scp -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "$IMAGE_ARCHIVE" "${ssh_user}@${JETSON_HOST}:${REMOTE_DIR}/${REMOTE_FILE}"
-          echo "remote_archive=${REMOTE_DIR}/${REMOTE_FILE}" >> "$GITHUB_ENV"
+          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" '
+            set -e
+            mkdir -p "$HOME/jetson-images"
+            rm -f "$HOME"/jetson-images/jetson_anomaly-*.tar 2>/dev/null || true
+            docker image prune -f || true
+            df -h / "$HOME" /var/lib/docker 2>/dev/null || true
+          '
 
-      - name: Load image on Jetson
+      - name: Stream and load image on Jetson
         if: github.event_name != 'pull_request'
         run: |
           set -e
           GENERATED_IMAGE="${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.base_name }}-${{ steps.version.outputs.version_tag }}"
           COMPOSE_IMAGE='${{ steps.compose.outputs.image }}'
           ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
-            "docker load -i ${remote_archive} && docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null && rm -f ${remote_archive}"
+            'docker load' < "$IMAGE_ARCHIVE"
+          ssh -i ~/.ssh/jetson_key -o StrictHostKeyChecking=accept-new "${ssh_user}@${JETSON_HOST}" \
+            "docker image inspect '${GENERATED_IMAGE}' >/dev/null && docker image inspect '${COMPOSE_IMAGE}' >/dev/null"
 
       - name: Update Jetson runtime stack
         if: github.event_name != 'pull_request'

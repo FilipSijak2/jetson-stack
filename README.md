@@ -202,8 +202,8 @@ GitHub Actions deploys from `devel`:
 
 1. validates Compose, Python, shell scripts, and the topic contract
 2. builds the `linux/arm64` Docker image
-3. copies the Docker archive to Jetson over Tailscale SSH
-4. runs `docker load` on Jetson
+3. streams the Docker archive to `docker load` on Jetson over Tailscale SSH
+4. verifies the generated and runtime image tags on Jetson
 5. runs `scripts/pull-unprotected.sh origin devel` on Jetson
 6. starts the runtime stack with `docker compose up -d --remove-orphans`
 
