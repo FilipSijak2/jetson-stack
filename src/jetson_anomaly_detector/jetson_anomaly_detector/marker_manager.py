@@ -13,6 +13,9 @@ MARKER_ADD = 0
 MARKER_DELETE = 2
 MARKER_CUBE = 1
 MARKER_TEXT_VIEW_FACING = 9
+TEXT_MARKER_HEIGHT_M = 0.08
+TEXT_MARKER_Z_OFFSET_M = 0.18
+OBJECT_MARKER_SIZE_M = 0.20
 
 
 @dataclass
@@ -27,9 +30,21 @@ class ActiveCluster:
 
 
 class MarkerManager:
-    def __init__(self, frame_id: str = "map", merge_radius_m: float = 0.20) -> None:
+    def __init__(
+        self,
+        frame_id: str = "map",
+        merge_radius_m: float = 0.20,
+        object_marker_size_m: float = OBJECT_MARKER_SIZE_M,
+        text_height_m: float = TEXT_MARKER_HEIGHT_M,
+        text_z_offset_m: float = TEXT_MARKER_Z_OFFSET_M,
+        text_show_count: bool = False,
+    ) -> None:
         self.frame_id = frame_id
         self.merge_radius_m = merge_radius_m
+        self.object_marker_size_m = max(0.05, float(object_marker_size_m))
+        self.text_height_m = max(0.01, float(text_height_m))
+        self.text_z_offset_m = max(0.0, float(text_z_offset_m))
+        self.text_show_count = bool(text_show_count)
         self.active: Dict[str, ActiveCluster] = {}
         self.delete_queue: List[int] = []
         self.next_marker_base_id = 2
@@ -118,10 +133,9 @@ class MarkerManager:
 
     def _object_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
         msg = self._base(cluster, cluster.marker_base_id, MARKER_CUBE, stamp)
-        side = max(0.20, self.merge_radius_m * 2.0)
         msg.update(
             {
-                "scale": {"x": side, "y": side, "z": 0.08},
+                "scale": {"x": self.object_marker_size_m, "y": self.object_marker_size_m, "z": 0.08},
                 "color": {"r": 1.0, "g": 0.05, "b": 0.0, "a": 0.75},
             }
         )
@@ -129,10 +143,10 @@ class MarkerManager:
 
     def _text_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
         msg = self._base(cluster, cluster.marker_base_id + 1, MARKER_TEXT_VIEW_FACING, stamp)
-        msg["pose"]["position"]["z"] = cluster.object_pose.z + 0.35
+        msg["pose"]["position"]["z"] = cluster.object_pose.z + self.text_z_offset_m
         msg.update(
             {
-                "scale": {"x": 0.0, "y": 0.0, "z": 0.20},
+                "scale": {"x": 0.0, "y": 0.0, "z": self.text_height_m},
                 "color": {"r": 1.0, "g": 0.1, "b": 0.0, "a": 1.0},
                 "text": self._label_text(cluster),
             }
@@ -171,6 +185,6 @@ class MarkerManager:
         )
 
     def _label_text(self, cluster: ActiveCluster) -> str:
-        if cluster.count <= 1:
+        if not self.text_show_count or cluster.count <= 1:
             return cluster.label
         return f"{cluster.label} x{cluster.count}"

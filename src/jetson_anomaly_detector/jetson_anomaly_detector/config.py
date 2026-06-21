@@ -67,7 +67,11 @@ class AppConfig:
     detection_cooldown_s: float = 5.0
     marker_ttl_s: float = 180.0
     marker_republish_hz: float = 1.0
-    cluster_merge_radius_m: float = 0.20
+    cluster_merge_radius_m: float = 0.60
+    marker_object_size_m: float = 0.20
+    marker_text_height_m: float = 0.08
+    marker_text_z_offset_m: float = 0.18
+    marker_text_show_count: bool = False
     default_anomaly_distance_m: float = 1.5
     camera_horizontal_fov_deg: float = 69.0
     camera_yaw_offset_deg: float = 0.0
@@ -111,6 +115,10 @@ ENV_OVERRIDES = {
     "marker_ttl_s": ("MARKER_TTL_S", _env_float),
     "marker_republish_hz": ("MARKER_REPUBLISH_HZ", _env_float),
     "cluster_merge_radius_m": ("CLUSTER_MERGE_RADIUS_M", _env_float),
+    "marker_object_size_m": ("MARKER_OBJECT_SIZE_M", _env_float),
+    "marker_text_height_m": ("MARKER_TEXT_HEIGHT_M", _env_float),
+    "marker_text_z_offset_m": ("MARKER_TEXT_Z_OFFSET_M", _env_float),
+    "marker_text_show_count": ("MARKER_TEXT_SHOW_COUNT", _env_bool),
     "default_anomaly_distance_m": ("DEFAULT_ANOMALY_DISTANCE_M", _env_float),
     "camera_horizontal_fov_deg": ("CAMERA_HORIZONTAL_FOV_DEG", _env_float),
     "camera_yaw_offset_deg": ("CAMERA_YAW_OFFSET_DEG", _env_float),
@@ -166,7 +174,10 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["jpeg_quality"] = max(1, min(100, int(normalized.get("jpeg_quality", 85))))
     normalized["debug_image_publish_hz"] = max(0.1, float(normalized.get("debug_image_publish_hz", 2.0)))
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
-    normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 0.20)))
+    normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 0.60)))
+    normalized["marker_object_size_m"] = max(0.05, float(normalized.get("marker_object_size_m", 0.20)))
+    normalized["marker_text_height_m"] = max(0.01, float(normalized.get("marker_text_height_m", 0.08)))
+    normalized["marker_text_z_offset_m"] = max(0.0, float(normalized.get("marker_text_z_offset_m", 0.18)))
     normalized["laser_window_deg"] = max(0.5, float(normalized.get("laser_window_deg", 6.0)))
     normalized["laser_min_distance_m"] = max(0.01, float(normalized.get("laser_min_distance_m", 0.10)))
     normalized["laser_max_distance_m"] = max(

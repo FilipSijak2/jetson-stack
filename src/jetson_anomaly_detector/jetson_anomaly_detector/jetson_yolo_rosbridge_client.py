@@ -71,16 +71,25 @@ class JetsonYoloRosbridgeClient:
             mock_mode=config.mock_mode,
             logger=LOGGER,
         )
-        self.markers = MarkerManager(frame_id=config.map_frame_id, merge_radius_m=config.cluster_merge_radius_m)
+        self.markers = MarkerManager(
+            frame_id=config.map_frame_id,
+            merge_radius_m=config.cluster_merge_radius_m,
+            object_marker_size_m=config.marker_object_size_m,
+            text_height_m=config.marker_text_height_m,
+            text_z_offset_m=config.marker_text_z_offset_m,
+            text_show_count=config.marker_text_show_count,
+        )
         self.rosbridge = RosbridgeClient(config.rosbridge_url, LOGGER)
         self.latest_map: Optional[OccupancyGridMap] = None
         self.latest_pose: Optional[RobotPoseMap] = None
         self.latest_scan: Optional[LaserScan] = None
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
+        self.reported_anomalies: List[tuple[str, ObjectPoseMap]] = []
         self.daily_clusters: Dict[str, AnomalyClusterSummary] = {}
         self.frame_count = 0
         self.event_counter = 0
+        self._load_reported_anomalies()
         self.stop_requested = False
         self.next_marker_publish = 0.0
         self.next_debug_image_publish = 0.0
@@ -209,10 +218,20 @@ class JetsonYoloRosbridgeClient:
 
         located = [self._locate_detection(detection, frame.shape[1]) for detection in anomalies]
         for group in self._group_located_detections(located):
-            if not self._cooldown_ready(group.label, group.object_pose):
+            cluster = self.markers.add_or_update(
+                label=group.label,
+                object_pose=group.object_pose,
+                observed_count=len(group.detections),
+                ttl_s=self.config.marker_ttl_s,
+            )
+            self.daily_clusters[cluster.cluster_id] = cluster
+            if self._already_reported(group.label, cluster.object_pose):
+                self._remember_reported(group.label, cluster.object_pose)
+                continue
+            if not self._cooldown_ready(group.label, cluster.object_pose):
                 continue
             try:
-                self._create_anomaly_event(group, frame, msg)
+                self._create_anomaly_event(group, cluster, frame, msg)
             except Exception as exc:
                 LOGGER.warning("Failed to create anomaly event: %s", exc)
 
@@ -294,7 +313,74 @@ class JetsonYoloRosbridgeClient:
         cell = max(0.01, self.config.cluster_merge_radius_m)
         return f"{label}:{round(object_pose.x / cell)}:{round(object_pose.y / cell)}"
 
-    def _create_anomaly_event(self, group: DetectionGroup, frame: np.ndarray, source_msg: Dict[str, Any]) -> None:
+    def _already_reported(self, label: str, object_pose: ObjectPoseMap) -> bool:
+        return self._reported_index(label, object_pose) is not None
+
+    def _reported_index(self, label: str, object_pose: ObjectPoseMap) -> Optional[int]:
+        radius = max(0.01, self.config.cluster_merge_radius_m)
+        for index, (reported_label, reported_pose) in enumerate(self.reported_anomalies):
+            if reported_label == label and _distance_xy(reported_pose, object_pose) <= radius:
+                return index
+        return None
+
+    def _remember_reported(self, label: str, object_pose: ObjectPoseMap) -> None:
+        index = self._reported_index(label, object_pose)
+        if index is None:
+            self.reported_anomalies.append((label, object_pose))
+        else:
+            self.reported_anomalies[index] = (label, object_pose)
+
+    def _load_reported_anomalies(self) -> None:
+        try:
+            lines = self.event_log_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            LOGGER.warning("Could not read anomaly event log %s: %s", self.event_log_path, exc)
+            return
+
+        loaded = 0
+        max_event_counter = self.event_counter
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+                label = str(event.get("label") or "")
+                pose = event.get("object_pose_map") or {}
+                event_id = str(event.get("id") or "")
+                object_pose = ObjectPoseMap(
+                    x=float(pose["x"]),
+                    y=float(pose["y"]),
+                    z=float(pose.get("z", 0.0)),
+                )
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                LOGGER.warning("Skipping invalid anomaly event log line: %s", exc)
+                continue
+
+            if label:
+                before = len(self.reported_anomalies)
+                self._remember_reported(label, object_pose)
+                if len(self.reported_anomalies) > before:
+                    loaded += 1
+
+            if event_id.startswith("anom_"):
+                try:
+                    max_event_counter = max(max_event_counter, int(event_id.rsplit("_", 1)[1]))
+                except (IndexError, ValueError):
+                    pass
+
+        self.event_counter = max_event_counter
+        if loaded:
+            LOGGER.info("Loaded %d remembered anomaly locations from %s", loaded, self.event_log_path)
+
+    def _create_anomaly_event(
+        self,
+        group: DetectionGroup,
+        cluster: AnomalyClusterSummary,
+        frame: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> None:
         self.event_counter += 1
         event_id = f"anom_{self.event_counter:05d}"
         detection = max(group.detections, key=lambda value: value.confidence)
@@ -305,13 +391,6 @@ class JetsonYoloRosbridgeClient:
         robot_pose = self.latest_pose
         if robot_pose is None:
             return
-        cluster = self.markers.add_or_update(
-            label=group.label,
-            object_pose=group.object_pose,
-            observed_count=len(group.detections),
-            ttl_s=self.config.marker_ttl_s,
-        )
-        self.daily_clusters[cluster.cluster_id] = cluster
 
         snapshot_path: Optional[Path] = None
         snapshot_image = None
@@ -357,6 +436,7 @@ class JetsonYoloRosbridgeClient:
         if snapshot_image is not None and self.config.daily_map_summary_topic_publish:
             self._publish_map_snapshot(snapshot_image, source_msg)
         self._mark_cooldown(group.label, cluster.object_pose)
+        self._remember_reported(group.label, cluster.object_pose)
         LOGGER.info(
             "Anomaly %s label=%s confidence=%.2f cluster=%s count=%d",
             event_id,

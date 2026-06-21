@@ -14,6 +14,9 @@ def occupancy_grid_to_image(grid: OccupancyGridMap) -> np.ndarray:
     image[grid.data == 0] = 255
     image[grid.data >= 50] = 0
     image[(grid.data > 0) & (grid.data < 50)] = 200
+    # ROS OccupancyGrid row 0 is the map's minimum-y row. Image row 0 is the
+    # top of the PNG, so flip vertically to match the map view used by Foxglove.
+    image = np.flipud(image)
     return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
 
