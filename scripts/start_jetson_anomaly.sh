@@ -31,6 +31,18 @@ echo "[jetson-anomaly] artifact_root=${JETSON_ARTIFACT_ROOT}"
 echo "[jetson-anomaly] log_file=${LOG_FILE}"
 echo "[jetson-anomaly] Jetson runs as a plain Python WebSocket client; no ROS 2 DDS runtime is used"
 
+python3 - <<'PY' || true
+try:
+    import torch
+    print(
+        "[jetson-anomaly] torch="
+        f"{torch.__version__} torch_cuda={torch.version.cuda} "
+        f"cuda_available={torch.cuda.is_available()}"
+    )
+except Exception as exc:
+    print(f"[jetson-anomaly][WARN] torch import/check failed: {exc}")
+PY
+
 export PYTHONPATH="/workspace/src/jetson_anomaly_detector:${PYTHONPATH:-}"
 exec python3 -m jetson_anomaly_detector.jetson_yolo_rosbridge_client \
   --config "${ANOMALY_CONFIG_FILE}"

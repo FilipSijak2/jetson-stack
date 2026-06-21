@@ -4,4 +4,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        L4T_BASE: ${L4T_BASE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
         INSTALL_ULTRALYTICS: ${INSTALL_ULTRALYTICS:-true}
+        PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/}
+        TORCH_VERSION: ${TORCH_VERSION:-2.8.0}
+        TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.23.0}
+        ULTRALYTICS_VERSION: ${ULTRALYTICS_VERSION:-8.3.40}

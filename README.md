@@ -105,22 +105,47 @@ CAMERA_TOPIC=/camera/realsense/color/image_compressed
 
 ## YOLO Dependencies
 
-The Dockerfile installs `websocket-client` and, by default, `ultralytics`.
-Jetson PyTorch wheels are sometimes JetPack-specific. If you already install
-NVIDIA's Jetson PyTorch manually, build with:
+The Dockerfile uses the JetPack 6-compatible L4T base image
+`nvcr.io/nvidia/l4t-jetpack:r36.4.0`, installs Jetson CUDA 12.6 PyTorch wheels
+from `https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/`, then installs
+Ultralytics without allowing pip to replace `torch` or `torchvision`.
+
+Default build pins:
+
+```bash
+L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
+PYTORCH_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/
+TORCH_VERSION=2.8.0
+TORCHVISION_VERSION=0.23.0
+ULTRALYTICS_VERSION=8.3.40
+```
+
+Build on the Jetson with:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml build jetson_anomaly
+docker compose up -d --force-recreate jetson_anomaly
+```
+
+Verify the container sees CUDA:
+
+```bash
+docker exec jetson_anomaly_cont python3 - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+PY
+```
+
+If you want to skip all YOLO/PyTorch installation for a mock-only image, build
+with:
 
 ```bash
 INSTALL_ULTRALYTICS=false docker compose \
   -f docker-compose.yaml \
   -f docker-compose.build.yaml \
   build jetson_anomaly
-```
-
-Then install YOLO dependencies inside your Jetson Python environment:
-
-```bash
-python3 -m pip install --upgrade pip
-python3 -m pip install ultralytics
 ```
 
 For real inference, `MOCK_MODE` must stay `0` and `YOLO_MODEL_PATH` should point

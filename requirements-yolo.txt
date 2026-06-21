@@ -1,2 +1,5 @@
-ultralytics>=8.0.0
+# Keep torch/torchvision out of this file. The Dockerfile installs Jetson
+# CUDA 12.6-compatible wheels first, then installs these helper packages and
+# ultralytics with --no-deps so pip cannot replace torch with a desktop wheel.
+ultralytics-thop>=2.0.0,<2.1.0
 
