@@ -82,7 +82,11 @@ RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
         "${NVIDIA_PYTHON_LIBS}/cudss/lib" \
         "${NVIDIA_PYTHON_LIBS}/cusparselt/lib" \
         > /etc/ld.so.conf.d/nvidia-pip-libs.conf && \
-    ldconfig; \
+    if ldconfig; then \
+        echo "[jetson-anomaly] NVIDIA Python CUDA helper libs added to ld cache"; \
+    else \
+        echo "[jetson-anomaly] WARNING: ldconfig failed during build; continuing with LD_LIBRARY_PATH"; \
+    fi; \
     else \
     echo "[jetson-anomaly] Skipping NVIDIA Python CUDA helper libs (INSTALL_ULTRALYTICS=false)"; \
     fi
