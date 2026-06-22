@@ -77,6 +77,7 @@ class MarkerManager:
             cluster.expires_at = time.monotonic() + ttl_s
             cluster.ttl_s = ttl_s
 
+        cluster = self._merge_overlapping_clusters(cluster)
         return self._summary(cluster)
 
     def build_marker_array(self) -> Dict[str, Any]:
@@ -105,6 +106,29 @@ class MarkerManager:
                 nearest = cluster
                 nearest_distance = distance
         return nearest
+
+    def _merge_overlapping_clusters(self, target: ActiveCluster) -> ActiveCluster:
+        merged = True
+        while merged:
+            merged = False
+            for cluster_id, candidate in list(self.active.items()):
+                if candidate is target or candidate.label != target.label:
+                    continue
+                distance = math.hypot(
+                    target.object_pose.x - candidate.object_pose.x,
+                    target.object_pose.y - candidate.object_pose.y,
+                )
+                if distance > self.merge_radius_m:
+                    continue
+                target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose)
+                target.count = max(target.count, candidate.count)
+                target.expires_at = max(target.expires_at, candidate.expires_at)
+                target.ttl_s = max(target.ttl_s, candidate.ttl_s)
+                self.active.pop(cluster_id, None)
+                self.delete_queue.extend([candidate.marker_base_id, candidate.marker_base_id + 1])
+                merged = True
+                break
+        return target
 
     def _expire_old_markers(self) -> None:
         now = time.monotonic()

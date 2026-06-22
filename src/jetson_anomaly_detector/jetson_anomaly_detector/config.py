@@ -67,7 +67,7 @@ class AppConfig:
     detection_cooldown_s: float = 5.0
     marker_ttl_s: float = 180.0
     marker_republish_hz: float = 1.0
-    cluster_merge_radius_m: float = 0.60
+    cluster_merge_radius_m: float = 1.00
     marker_object_size_m: float = 0.20
     marker_text_height_m: float = 0.08
     marker_text_z_offset_m: float = 0.18
@@ -174,7 +174,7 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["jpeg_quality"] = max(1, min(100, int(normalized.get("jpeg_quality", 85))))
     normalized["debug_image_publish_hz"] = max(0.1, float(normalized.get("debug_image_publish_hz", 2.0)))
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
-    normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 0.60)))
+    normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))
     normalized["marker_object_size_m"] = max(0.05, float(normalized.get("marker_object_size_m", 0.20)))
     normalized["marker_text_height_m"] = max(0.01, float(normalized.get("marker_text_height_m", 0.08)))
     normalized["marker_text_z_offset_m"] = max(0.0, float(normalized.get("marker_text_z_offset_m", 0.18)))

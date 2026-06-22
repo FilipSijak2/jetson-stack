@@ -121,8 +121,8 @@ def _draw_cluster(
         2,
     )
     cv2.circle(image, (px, py), 4, color, -1)
-    suffix = f" x{count}" if count > 1 else ""
-    text = f"{label}{suffix}"
+    del count
+    text = label
     font_scale = 0.35
     thickness = 1
     (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)

@@ -92,6 +92,7 @@ class JetsonYoloRosbridgeClient:
         self._load_reported_anomalies()
         self.stop_requested = False
         self.next_marker_publish = 0.0
+        self.next_daily_summary_refresh = 0.0
         self.next_debug_image_publish = 0.0
         self.last_missing_pose_log = 0.0
         self.last_missing_map_log = 0.0
@@ -227,6 +228,7 @@ class JetsonYoloRosbridgeClient:
             self.daily_clusters[cluster.cluster_id] = cluster
             if self._already_reported(group.label, cluster.object_pose):
                 self._remember_reported(group.label, cluster.object_pose)
+                self._refresh_daily_map_summary(msg)
                 continue
             if not self._cooldown_ready(group.label, cluster.object_pose):
                 continue
@@ -328,7 +330,8 @@ class JetsonYoloRosbridgeClient:
         if index is None:
             self.reported_anomalies.append((label, object_pose))
         else:
-            self.reported_anomalies[index] = (label, object_pose)
+            _, previous_pose = self.reported_anomalies[index]
+            self.reported_anomalies[index] = (label, _blend_pose(previous_pose, object_pose, new_weight=0.25))
 
     def _load_reported_anomalies(self) -> None:
         try:
@@ -392,21 +395,11 @@ class JetsonYoloRosbridgeClient:
         if robot_pose is None:
             return
 
+        self._remember_reported(group.label, cluster.object_pose)
         snapshot_path: Optional[Path] = None
-        snapshot_image = None
-        if self.latest_map is not None:
-            try:
-                if self.config.daily_map_summary:
-                    snapshot_path = self._daily_map_path()
-                    snapshot_image = save_daily_map_summary(
-                        self.latest_map,
-                        list(self.daily_clusters.values()),
-                        snapshot_path,
-                    )
-            except Exception as exc:
-                LOGGER.warning("Failed to generate daily map summary: %s", exc)
-        else:
-            self._log_missing_map()
+        refreshed_summary = self._refresh_daily_map_summary(source_msg, force=True)
+        if refreshed_summary is not None:
+            snapshot_path, _snapshot_image = refreshed_summary
 
         if self.config.save_per_event_images:
             original_path = self.original_dir / f"{event_id}_{label_slug}.jpg"
@@ -433,10 +426,7 @@ class JetsonYoloRosbridgeClient:
         self.event_writer.append(event)
         self._publish_event(event)
         self._publish_debug_image(annotate_frame(frame.copy(), group.detections), source_msg)
-        if snapshot_image is not None and self.config.daily_map_summary_topic_publish:
-            self._publish_map_snapshot(snapshot_image, source_msg)
         self._mark_cooldown(group.label, cluster.object_pose)
-        self._remember_reported(group.label, cluster.object_pose)
         LOGGER.info(
             "Anomaly %s label=%s confidence=%.2f cluster=%s count=%d",
             event_id,
@@ -489,6 +479,45 @@ class JetsonYoloRosbridgeClient:
     def _daily_map_path(self) -> Path:
         day = datetime.now().strftime("%Y-%m-%d")
         return self.daily_map_dir / f"anomalies_{day}.png"
+
+    def _reported_summaries(self) -> List[AnomalyClusterSummary]:
+        return [
+            AnomalyClusterSummary(
+                cluster_id=f"reported_{index:05d}",
+                label=label,
+                object_pose=pose,
+                count=1,
+            )
+            for index, (label, pose) in enumerate(self.reported_anomalies, start=1)
+        ]
+
+    def _refresh_daily_map_summary(
+        self,
+        source_msg: Dict[str, Any],
+        force: bool = False,
+    ) -> Optional[tuple[Path, np.ndarray]]:
+        if not self.config.daily_map_summary:
+            return None
+        if self.latest_map is None:
+            self._log_missing_map()
+            return None
+        now = time.monotonic()
+        if not force and now < self.next_daily_summary_refresh:
+            return None
+        self.next_daily_summary_refresh = now + 15.0
+        try:
+            snapshot_path = self._daily_map_path()
+            snapshot_image = save_daily_map_summary(
+                self.latest_map,
+                self._reported_summaries(),
+                snapshot_path,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to generate daily map summary: %s", exc)
+            return None
+        if self.config.daily_map_summary_topic_publish:
+            self._publish_map_snapshot(snapshot_image, source_msg)
+        return snapshot_path, snapshot_image
 
     def _publish_event(self, event: Dict[str, Any]) -> None:
         self.rosbridge.publish(self.config.event_topic, {"data": json.dumps(event, separators=(",", ":"))})
