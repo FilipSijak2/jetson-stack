@@ -51,16 +51,23 @@ the robot stack's `config/containers/*.env` layout. Important defaults:
 ```bash
 ROSBRIDGE_URL=ws://raspberry.local:9090
 CAMERA_TOPIC=/camera/color/image/compressed
+DEPTH_TOPIC=/camera/realsense/aligned_depth_to_color/image_raw
 MAP_TOPIC=/map
 ROBOT_POSE_TOPIC=/robot_pose_map
 SCAN_TOPIC=/scan
+USE_DEPTH_DISTANCE=1
+DEPTH_ROI_SCALE=0.60
+DEPTH_MIN_VALID_PIXELS=20
 USE_LASER_DISTANCE=1
 LASER_WINDOW_DEG=6
 ANOMALY_CLASSES=bottle
 CONFIDENCE_THRESHOLD=0.5
 DETECTION_COOLDOWN_S=5
 CLUSTER_MERGE_RADIUS_M=0.20
-SAVE_PER_EVENT_IMAGES=0
+REPORTED_MERGE_RADIUS_M=2.00
+ANOMALY_MIN_OBSERVATIONS=3
+ANOMALY_CONFIRMATION_TTL_S=4.0
+SAVE_PER_EVENT_IMAGES=1
 DAILY_MAP_SUMMARY=1
 DEBUG_IMAGE_ALWAYS_STREAM=1
 DEBUG_IMAGE_ON_DETECTION=1
@@ -79,16 +86,25 @@ The structured YAML defaults live in `config/anomaly_rosbridge.yaml`.
 Environment variables from `config/containers/jetson_anomaly.env` override the
 YAML values.
 
-When `/scan` is available, Jetson uses the laser range around the detected
-bounding-box bearing to place the anomaly on the map. If no valid scan range is
-available, it falls back to `DEFAULT_ANOMALY_DISTANCE_M`.
+When RealSense aligned depth is available, Jetson estimates object distance
+from valid depth pixels inside the central part of the detected bounding box.
+This keeps a table leg or other obstacle in front of the object from being
+mistaken for the bottle distance. If depth is unavailable or too sparse, Jetson
+falls back to the laser range around the detected bounding-box bearing. If no
+valid scan range is available either, it falls back to
+`DEFAULT_ANOMALY_DISTANCE_M`.
 
 Detections with the same label within `CLUSTER_MERGE_RADIUS_M` are merged into
 one map square and marker text shows the observed count, for example
-`bottle x3`. By default Jetson does not save original/annotated camera images
-for every event; it keeps a daily map summary at
-`/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` and
-updates it as new anomaly clusters are detected.
+`bottle x3`. A map marker/event is created only after
+`ANOMALY_MIN_OBSERVATIONS` spatially consistent observations within
+`ANOMALY_CONFIRMATION_TTL_S`, which filters one-frame pose jumps from the
+camera-to-map projection. Already reported objects are de-duplicated with
+`REPORTED_MERGE_RADIUS_M`, intentionally a little wider than the live marker
+merge radius. By default Jetson saves original/annotated camera images for
+each new event and keeps a daily map summary at
+`/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` as new
+anomaly clusters are detected.
 
 If your active RealSense compressed topic is namespaced differently, set for
 example:
@@ -263,8 +279,8 @@ Example `/anomaly/events` payload:
   "object_pose_map": {"x": 2.10, "y": -0.92, "z": 0.0},
   "cluster": {"id": "cluster_00003", "count": 2, "merge_radius_m": 0.2},
   "jetson_files": {
-    "original_image": null,
-    "annotated_image": null,
+    "original_image": "/home/jetson/anomaly_logs/images/original/anom_00042_bottle.jpg",
+    "annotated_image": "/home/jetson/anomaly_logs/images/annotated/anom_00042_bottle.jpg",
     "map_snapshot": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
     "daily_map_summary": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
     "event_log": "/home/jetson/anomaly_logs/events.jsonl"
@@ -280,8 +296,8 @@ bag analysis.
 
 Jetson writes:
 
-- optional original frames: `/home/jetson/anomaly_logs/images/original/`
-- optional annotated frames: `/home/jetson/anomaly_logs/images/annotated/`
+- original frames: `/home/jetson/anomaly_logs/images/original/`
+- annotated frames: `/home/jetson/anomaly_logs/images/annotated/`
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`

@@ -41,6 +41,41 @@ def decode_compressed_image(msg: Dict[str, Any]) -> np.ndarray:
     return frame
 
 
+def decode_depth_image(msg: Dict[str, Any]) -> np.ndarray:
+    height = int(msg.get("height", 0))
+    width = int(msg.get("width", 0))
+    step = int(msg.get("step", 0))
+    encoding = str(msg.get("encoding", "")).strip().lower()
+    is_bigendian = bool(int(msg.get("is_bigendian", 0)))
+    if height <= 0 or width <= 0:
+        raise ValueError("Invalid depth image dimensions")
+
+    if encoding in {"16uc1", "mono16"}:
+        dtype = np.dtype(">u2" if is_bigendian else "<u2")
+        scale = 0.001
+    elif encoding == "32fc1":
+        dtype = np.dtype(">f4" if is_bigendian else "<f4")
+        scale = 1.0
+    else:
+        raise ValueError(f"Unsupported depth image encoding: {encoding!r}")
+
+    row_bytes = width * dtype.itemsize
+    if step <= 0:
+        step = row_bytes
+    if step < row_bytes:
+        raise ValueError(f"Depth image step {step} is smaller than row bytes {row_bytes}")
+
+    raw = decode_uint8_array(msg.get("data", ""))
+    expected = height * step
+    if len(raw) < expected:
+        raise ValueError(f"Depth image payload {len(raw)} bytes is smaller than expected {expected}")
+
+    rows = np.frombuffer(raw[:expected], dtype=np.uint8).reshape((height, step))
+    packed = np.ascontiguousarray(rows[:, :row_bytes])
+    depth = packed.view(dtype).reshape((height, width)).astype(np.float32)
+    return depth * scale
+
+
 def compressed_image_msg(
     encoded_bytes: bytes,
     image_format: str,

@@ -16,13 +16,14 @@ import numpy as np
 
 from .config import AppConfig, load_config
 from .event_schema import EventJsonlWriter, build_event, build_readable_event
-from .localization import estimate_laser_distance_m, estimate_object_pose_map
+from .localization import estimate_depth_distance_m, estimate_laser_distance_m, estimate_object_pose_map
 from .map_snapshot import save_daily_map_summary
 from .marker_manager import MarkerManager
 from .models import AnomalyClusterSummary, Detection, LaserScan, ObjectPoseMap, OccupancyGridMap, RobotPoseMap
 from .ros_messages import (
     compressed_image_msg,
     decode_compressed_image,
+    decode_depth_image,
     encode_image,
     parse_occupancy_grid,
     parse_laser_scan,
@@ -46,6 +47,14 @@ class DetectionGroup:
     label: str
     detections: List[Detection]
     object_pose: ObjectPoseMap
+
+
+@dataclass
+class PendingAnomaly:
+    label: str
+    object_pose: ObjectPoseMap
+    observations: int
+    last_seen: float
 
 
 class JetsonYoloRosbridgeClient:
@@ -83,9 +92,12 @@ class JetsonYoloRosbridgeClient:
         self.latest_map: Optional[OccupancyGridMap] = None
         self.latest_pose: Optional[RobotPoseMap] = None
         self.latest_scan: Optional[LaserScan] = None
+        self.latest_depth: Optional[np.ndarray] = None
+        self.latest_depth_received_at = 0.0
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
         self.reported_anomalies: List[tuple[str, ObjectPoseMap]] = []
+        self.pending_anomalies: List[PendingAnomaly] = []
         self.daily_clusters: Dict[str, AnomalyClusterSummary] = {}
         self.frame_count = 0
         self.event_counter = 0
@@ -122,6 +134,13 @@ class JetsonYoloRosbridgeClient:
     def _setup_rosbridge_topics(self) -> None:
         self.rosbridge.subscribe(self.config.camera_topic, "sensor_msgs/CompressedImage", queue_length=1)
         self.rosbridge.subscribe(self.config.map_topic, "nav_msgs/OccupancyGrid", queue_length=1, throttle_rate=500)
+        if self.config.use_depth_distance and self.config.depth_topic:
+            self.rosbridge.subscribe(
+                self.config.depth_topic,
+                "sensor_msgs/Image",
+                queue_length=1,
+                throttle_rate=self.config.depth_throttle_ms,
+            )
         if self.config.use_laser_distance and self.config.scan_topic:
             self.rosbridge.subscribe(self.config.scan_topic, "sensor_msgs/LaserScan", queue_length=1, throttle_rate=100)
         pose_type = "geometry_msgs/PoseStamped"
@@ -136,11 +155,13 @@ class JetsonYoloRosbridgeClient:
         self.rosbridge.advertise(self.config.map_snapshot_topic, "sensor_msgs/CompressedImage")
 
         LOGGER.info(
-            "Subscribed camera=%s map=%s pose=%s scan=%s laser_distance=%s",
+            "Subscribed camera=%s depth=%s map=%s pose=%s scan=%s depth_distance=%s laser_distance=%s",
             self.config.camera_topic,
+            self.config.depth_topic if self.config.use_depth_distance else "disabled",
             self.config.map_topic,
             self.config.robot_pose_topic,
             self.config.scan_topic if self.config.use_laser_distance else "disabled",
+            self.config.use_depth_distance,
             self.config.use_laser_distance,
         )
         LOGGER.info(
@@ -171,6 +192,8 @@ class JetsonYoloRosbridgeClient:
 
         if topic == self.config.camera_topic:
             self._on_camera_image(msg)
+        elif topic == self.config.depth_topic:
+            self._on_depth_image(msg)
         elif topic == self.config.map_topic:
             self._on_map(msg)
         elif topic == self.config.robot_pose_topic:
@@ -196,6 +219,13 @@ class JetsonYoloRosbridgeClient:
         except Exception as exc:
             LOGGER.warning("Failed to parse LaserScan: %s", exc)
 
+    def _on_depth_image(self, msg: Dict[str, Any]) -> None:
+        try:
+            self.latest_depth = decode_depth_image(msg)
+            self.latest_depth_received_at = time.monotonic()
+        except Exception as exc:
+            LOGGER.warning("Failed to decode depth image: %s", exc)
+
     def _on_camera_image(self, msg: Dict[str, Any]) -> None:
         self.frame_count += 1
         if self.frame_count % self.config.inference_every_n_frames != 0:
@@ -217,23 +247,26 @@ class JetsonYoloRosbridgeClient:
             self._log_missing_pose()
             return
 
-        located = [self._locate_detection(detection, frame.shape[1]) for detection in anomalies]
+        located = [self._locate_detection(detection, frame.shape[1], frame.shape[0]) for detection in anomalies]
         for group in self._group_located_detections(located):
+            confirmed_group = self._confirm_detection_group(group)
+            if confirmed_group is None:
+                continue
+            if self._already_reported(confirmed_group.label, confirmed_group.object_pose):
+                self._remember_reported(confirmed_group.label, confirmed_group.object_pose)
+                self._refresh_daily_map_summary(msg)
+                continue
             cluster = self.markers.add_or_update(
-                label=group.label,
-                object_pose=group.object_pose,
-                observed_count=len(group.detections),
+                label=confirmed_group.label,
+                object_pose=confirmed_group.object_pose,
+                observed_count=len(confirmed_group.detections),
                 ttl_s=self.config.marker_ttl_s,
             )
             self.daily_clusters[cluster.cluster_id] = cluster
-            if self._already_reported(group.label, cluster.object_pose):
-                self._remember_reported(group.label, cluster.object_pose)
-                self._refresh_daily_map_summary(msg)
-                continue
-            if not self._cooldown_ready(group.label, cluster.object_pose):
+            if not self._cooldown_ready(confirmed_group.label, cluster.object_pose):
                 continue
             try:
-                self._create_anomaly_event(group, cluster, frame, msg)
+                self._create_anomaly_event(confirmed_group, cluster, frame, msg)
             except Exception as exc:
                 LOGGER.warning("Failed to create anomaly event: %s", exc)
 
@@ -245,7 +278,7 @@ class JetsonYoloRosbridgeClient:
             if detection.label in anomaly_labels and detection.confidence >= self.config.confidence_threshold
         ]
 
-    def _locate_detection(self, detection: Detection, image_width: int) -> LocatedDetection:
+    def _locate_detection(self, detection: Detection, image_width: int, image_height: int) -> LocatedDetection:
         robot_pose = self.latest_pose
         if robot_pose is None:
             raise RuntimeError("Cannot locate detection without robot pose")
@@ -256,7 +289,7 @@ class JetsonYoloRosbridgeClient:
             default_distance_m=self.config.default_anomaly_distance_m,
             camera_horizontal_fov_deg=self.config.camera_horizontal_fov_deg,
             camera_yaw_offset_deg=self.config.camera_yaw_offset_deg,
-            measured_distance_m=self._distance_for_detection(detection, image_width),
+            measured_distance_m=self._distance_for_detection(detection, image_width, image_height),
         )
         return LocatedDetection(detection=detection, object_pose=object_pose)
 
@@ -294,6 +327,70 @@ class JetsonYoloRosbridgeClient:
             z=sum(item.object_pose.z for item in group) / count,
         )
 
+    def _confirm_detection_group(self, group: DetectionGroup) -> Optional[DetectionGroup]:
+        if self.config.anomaly_min_observations <= 1:
+            return group
+        pending = self._remember_pending_anomaly(group)
+        if pending.observations < self.config.anomaly_min_observations:
+            LOGGER.debug(
+                "Pending anomaly label=%s observations=%d/%d",
+                group.label,
+                pending.observations,
+                self.config.anomaly_min_observations,
+            )
+            return None
+        return DetectionGroup(
+            label=group.label,
+            detections=group.detections,
+            object_pose=pending.object_pose,
+        )
+
+    def _remember_pending_anomaly(self, group: DetectionGroup) -> PendingAnomaly:
+        now = time.monotonic()
+        self._drop_stale_pending_anomalies(now)
+        index = self._pending_index(group.label, group.object_pose)
+        if index is None:
+            pending = PendingAnomaly(
+                label=group.label,
+                object_pose=group.object_pose,
+                observations=1,
+                last_seen=now,
+            )
+            self.pending_anomalies.append(pending)
+            return pending
+
+        pending = self.pending_anomalies[index]
+        observations = pending.observations + 1
+        pending.object_pose = _blend_pose(
+            pending.object_pose,
+            group.object_pose,
+            new_weight=1.0 / float(observations),
+        )
+        pending.observations = observations
+        pending.last_seen = now
+        return pending
+
+    def _drop_stale_pending_anomalies(self, now: float) -> None:
+        ttl = self.config.anomaly_confirmation_ttl_s
+        self.pending_anomalies = [
+            pending
+            for pending in self.pending_anomalies
+            if now - pending.last_seen <= ttl
+        ]
+
+    def _pending_index(self, label: str, object_pose: ObjectPoseMap) -> Optional[int]:
+        radius = max(0.01, self.config.cluster_merge_radius_m)
+        nearest_index = None
+        nearest_distance = float("inf")
+        for index, pending in enumerate(self.pending_anomalies):
+            if pending.label != label:
+                continue
+            distance = _distance_xy(pending.object_pose, object_pose)
+            if distance <= radius and distance < nearest_distance:
+                nearest_index = index
+                nearest_distance = distance
+        return nearest_index
+
     def _cooldown_ready(self, label: str, object_pose: ObjectPoseMap) -> bool:
         now = time.monotonic()
         stale_keys = [
@@ -319,7 +416,7 @@ class JetsonYoloRosbridgeClient:
         return self._reported_index(label, object_pose) is not None
 
     def _reported_index(self, label: str, object_pose: ObjectPoseMap) -> Optional[int]:
-        radius = max(0.01, self.config.cluster_merge_radius_m)
+        radius = max(0.01, self.config.reported_merge_radius_m)
         for index, (reported_label, reported_pose) in enumerate(self.reported_anomalies):
             if reported_label == label and _distance_xy(reported_pose, object_pose) <= radius:
                 return index
@@ -436,7 +533,12 @@ class JetsonYoloRosbridgeClient:
             cluster.count,
         )
 
-    def _distance_for_detection(self, detection: Detection, image_width: int) -> Optional[float]:
+    def _distance_for_detection(self, detection: Detection, image_width: int, image_height: int) -> Optional[float]:
+        if self.config.use_depth_distance:
+            distance_m = self._depth_distance_for_detection(detection, image_width, image_height)
+            if distance_m is not None:
+                return distance_m
+
         if not self.config.use_laser_distance:
             return None
         if self.latest_scan is None:
@@ -458,7 +560,38 @@ class JetsonYoloRosbridgeClient:
                 self.config.scan_topic,
                 detection.label,
                 self.config.default_anomaly_distance_m,
+        )
+        return distance_m
+
+    def _depth_distance_for_detection(
+        self,
+        detection: Detection,
+        image_width: int,
+        image_height: int,
+    ) -> Optional[float]:
+        depth = self.latest_depth
+        if depth is None:
+            return None
+        if time.monotonic() - self.latest_depth_received_at > self.config.depth_max_age_s:
+            return None
+        try:
+            distance_m = estimate_depth_distance_m(
+                depth_image=depth,
+                bbox_xyxy=detection.bbox_xyxy,
+                image_width=image_width,
+                image_height=image_height,
+                min_distance_m=self.config.depth_min_distance_m,
+                max_distance_m=self.config.depth_max_distance_m,
+                roi_scale=self.config.depth_roi_scale,
+                min_valid_pixels=self.config.depth_min_valid_pixels,
+                percentile=self.config.depth_distance_percentile,
             )
+        except Exception as exc:
+            LOGGER.warning("Failed to estimate depth distance: %s", exc)
+            return None
+
+        if distance_m is not None:
+            LOGGER.debug("Using depth distance %.2f m for %s", distance_m, detection.label)
         return distance_m
 
     def _publish_debug_stream_if_due(

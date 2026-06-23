@@ -7,6 +7,7 @@ camera_topic: /camera/color/image/compressed
 map_topic: /map
 robot_pose_topic: /robot_pose_map
 scan_topic: /scan
+depth_topic: /camera/realsense/aligned_depth_to_color/image_raw
 
 event_topic: /anomaly/events
 readable_event_topic: /anomaly/events/readable
@@ -24,6 +25,9 @@ detection_cooldown_s: 5.0
 marker_ttl_s: 180.0
 marker_republish_hz: 1.0
 cluster_merge_radius_m: 1.00
+reported_merge_radius_m: 2.00
+anomaly_min_observations: 3
+anomaly_confirmation_ttl_s: 4.0
 marker_object_size_m: 0.20
 marker_text_height_m: 0.08
 marker_text_z_offset_m: 0.18
@@ -32,6 +36,14 @@ marker_text_show_count: false
 default_anomaly_distance_m: 1.5
 camera_horizontal_fov_deg: 69.0
 camera_yaw_offset_deg: 0.0
+use_depth_distance: true
+depth_throttle_ms: 200
+depth_max_age_s: 1.0
+depth_roi_scale: 0.60
+depth_min_valid_pixels: 20
+depth_distance_percentile: 50.0
+depth_min_distance_m: 0.15
+depth_max_distance_m: 6.0
 use_laser_distance: true
 laser_window_deg: 6.0
 laser_min_distance_m: 0.10
@@ -42,7 +54,7 @@ mock_mode: false
 inference_every_n_frames: 1
 reconnect_delay_s: 3.0
 jpeg_quality: 85
-save_per_event_images: false
+save_per_event_images: true
 daily_map_summary: true
 daily_map_summary_topic_publish: true
 debug_image_always_stream: true

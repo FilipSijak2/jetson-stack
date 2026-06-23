@@ -56,6 +56,7 @@ class AppConfig:
     map_topic: str = "/map"
     robot_pose_topic: str = "/robot_pose_map"
     scan_topic: str = "/scan"
+    depth_topic: str = "/camera/realsense/aligned_depth_to_color/image_raw"
     event_topic: str = "/anomaly/events"
     readable_event_topic: str = "/anomaly/events/readable"
     marker_topic: str = "/anomaly/markers"
@@ -68,6 +69,9 @@ class AppConfig:
     marker_ttl_s: float = 180.0
     marker_republish_hz: float = 1.0
     cluster_merge_radius_m: float = 1.00
+    reported_merge_radius_m: float = 2.00
+    anomaly_min_observations: int = 3
+    anomaly_confirmation_ttl_s: float = 4.0
     marker_object_size_m: float = 0.20
     marker_text_height_m: float = 0.08
     marker_text_z_offset_m: float = 0.18
@@ -75,6 +79,14 @@ class AppConfig:
     default_anomaly_distance_m: float = 1.5
     camera_horizontal_fov_deg: float = 69.0
     camera_yaw_offset_deg: float = 0.0
+    use_depth_distance: bool = True
+    depth_throttle_ms: int = 200
+    depth_max_age_s: float = 1.0
+    depth_roi_scale: float = 0.60
+    depth_min_valid_pixels: int = 20
+    depth_distance_percentile: float = 50.0
+    depth_min_distance_m: float = 0.15
+    depth_max_distance_m: float = 6.0
     use_laser_distance: bool = True
     laser_window_deg: float = 6.0
     laser_min_distance_m: float = 0.10
@@ -84,7 +96,7 @@ class AppConfig:
     inference_every_n_frames: int = 1
     reconnect_delay_s: float = 3.0
     jpeg_quality: int = 85
-    save_per_event_images: bool = False
+    save_per_event_images: bool = True
     daily_map_summary: bool = True
     daily_map_summary_topic_publish: bool = True
     debug_image_always_stream: bool = True
@@ -103,6 +115,7 @@ ENV_OVERRIDES = {
     "map_topic": ("MAP_TOPIC", _env_str),
     "robot_pose_topic": ("ROBOT_POSE_TOPIC", _env_str),
     "scan_topic": ("SCAN_TOPIC", _env_str),
+    "depth_topic": ("DEPTH_TOPIC", _env_str),
     "event_topic": ("EVENT_TOPIC", _env_str),
     "readable_event_topic": ("READABLE_EVENT_TOPIC", _env_str),
     "marker_topic": ("MARKER_TOPIC", _env_str),
@@ -115,6 +128,9 @@ ENV_OVERRIDES = {
     "marker_ttl_s": ("MARKER_TTL_S", _env_float),
     "marker_republish_hz": ("MARKER_REPUBLISH_HZ", _env_float),
     "cluster_merge_radius_m": ("CLUSTER_MERGE_RADIUS_M", _env_float),
+    "reported_merge_radius_m": ("REPORTED_MERGE_RADIUS_M", _env_float),
+    "anomaly_min_observations": ("ANOMALY_MIN_OBSERVATIONS", _env_int),
+    "anomaly_confirmation_ttl_s": ("ANOMALY_CONFIRMATION_TTL_S", _env_float),
     "marker_object_size_m": ("MARKER_OBJECT_SIZE_M", _env_float),
     "marker_text_height_m": ("MARKER_TEXT_HEIGHT_M", _env_float),
     "marker_text_z_offset_m": ("MARKER_TEXT_Z_OFFSET_M", _env_float),
@@ -122,6 +138,14 @@ ENV_OVERRIDES = {
     "default_anomaly_distance_m": ("DEFAULT_ANOMALY_DISTANCE_M", _env_float),
     "camera_horizontal_fov_deg": ("CAMERA_HORIZONTAL_FOV_DEG", _env_float),
     "camera_yaw_offset_deg": ("CAMERA_YAW_OFFSET_DEG", _env_float),
+    "use_depth_distance": ("USE_DEPTH_DISTANCE", _env_bool),
+    "depth_throttle_ms": ("DEPTH_THROTTLE_MS", _env_int),
+    "depth_max_age_s": ("DEPTH_MAX_AGE_S", _env_float),
+    "depth_roi_scale": ("DEPTH_ROI_SCALE", _env_float),
+    "depth_min_valid_pixels": ("DEPTH_MIN_VALID_PIXELS", _env_int),
+    "depth_distance_percentile": ("DEPTH_DISTANCE_PERCENTILE", _env_float),
+    "depth_min_distance_m": ("DEPTH_MIN_DISTANCE_M", _env_float),
+    "depth_max_distance_m": ("DEPTH_MAX_DISTANCE_M", _env_float),
     "use_laser_distance": ("USE_LASER_DISTANCE", _env_bool),
     "laser_window_deg": ("LASER_WINDOW_DEG", _env_float),
     "laser_min_distance_m": ("LASER_MIN_DISTANCE_M", _env_float),
@@ -175,6 +199,28 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["debug_image_publish_hz"] = max(0.1, float(normalized.get("debug_image_publish_hz", 2.0)))
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
     normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))
+    normalized["reported_merge_radius_m"] = max(
+        normalized["cluster_merge_radius_m"],
+        float(normalized.get("reported_merge_radius_m", 2.00)),
+    )
+    normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 3)))
+    normalized["anomaly_confirmation_ttl_s"] = max(
+        0.1,
+        float(normalized.get("anomaly_confirmation_ttl_s", 4.0)),
+    )
+    normalized["depth_throttle_ms"] = max(0, int(normalized.get("depth_throttle_ms", 200)))
+    normalized["depth_max_age_s"] = max(0.1, float(normalized.get("depth_max_age_s", 1.0)))
+    normalized["depth_roi_scale"] = max(0.1, min(1.0, float(normalized.get("depth_roi_scale", 0.60))))
+    normalized["depth_min_valid_pixels"] = max(1, int(normalized.get("depth_min_valid_pixels", 20)))
+    normalized["depth_distance_percentile"] = max(
+        0.0,
+        min(100.0, float(normalized.get("depth_distance_percentile", 50.0))),
+    )
+    normalized["depth_min_distance_m"] = max(0.01, float(normalized.get("depth_min_distance_m", 0.15)))
+    normalized["depth_max_distance_m"] = max(
+        normalized["depth_min_distance_m"],
+        float(normalized.get("depth_max_distance_m", 6.0)),
+    )
     normalized["marker_object_size_m"] = max(0.05, float(normalized.get("marker_object_size_m", 0.20)))
     normalized["marker_text_height_m"] = max(0.01, float(normalized.get("marker_text_height_m", 0.08)))
     normalized["marker_text_z_offset_m"] = max(0.0, float(normalized.get("marker_text_z_offset_m", 0.18)))
