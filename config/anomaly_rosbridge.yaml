@@ -26,8 +26,8 @@ marker_ttl_s: 180.0
 marker_republish_hz: 1.0
 cluster_merge_radius_m: 1.00
 reported_merge_radius_m: 2.00
-anomaly_min_observations: 3
-anomaly_confirmation_ttl_s: 4.0
+anomaly_min_observations: 2
+anomaly_confirmation_ttl_s: 6.0
 marker_object_size_m: 0.20
 marker_text_height_m: 0.08
 marker_text_z_offset_m: 0.18

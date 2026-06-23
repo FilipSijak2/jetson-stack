@@ -70,8 +70,8 @@ class AppConfig:
     marker_republish_hz: float = 1.0
     cluster_merge_radius_m: float = 1.00
     reported_merge_radius_m: float = 2.00
-    anomaly_min_observations: int = 3
-    anomaly_confirmation_ttl_s: float = 4.0
+    anomaly_min_observations: int = 2
+    anomaly_confirmation_ttl_s: float = 6.0
     marker_object_size_m: float = 0.20
     marker_text_height_m: float = 0.08
     marker_text_z_offset_m: float = 0.18
@@ -203,10 +203,10 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
         normalized["cluster_merge_radius_m"],
         float(normalized.get("reported_merge_radius_m", 2.00)),
     )
-    normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 3)))
+    normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 2)))
     normalized["anomaly_confirmation_ttl_s"] = max(
         0.1,
-        float(normalized.get("anomaly_confirmation_ttl_s", 4.0)),
+        float(normalized.get("anomaly_confirmation_ttl_s", 6.0)),
     )
     normalized["depth_throttle_ms"] = max(0, int(normalized.get("depth_throttle_ms", 200)))
     normalized["depth_max_age_s"] = max(0.1, float(normalized.get("depth_max_age_s", 1.0)))

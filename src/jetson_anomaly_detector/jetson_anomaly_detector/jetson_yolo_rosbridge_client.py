@@ -252,10 +252,6 @@ class JetsonYoloRosbridgeClient:
             confirmed_group = self._confirm_detection_group(group)
             if confirmed_group is None:
                 continue
-            if self._already_reported(confirmed_group.label, confirmed_group.object_pose):
-                self._remember_reported(confirmed_group.label, confirmed_group.object_pose)
-                self._refresh_daily_map_summary(msg)
-                continue
             cluster = self.markers.add_or_update(
                 label=confirmed_group.label,
                 object_pose=confirmed_group.object_pose,
@@ -263,6 +259,10 @@ class JetsonYoloRosbridgeClient:
                 ttl_s=self.config.marker_ttl_s,
             )
             self.daily_clusters[cluster.cluster_id] = cluster
+            if self._already_reported(confirmed_group.label, cluster.object_pose):
+                self._remember_reported(confirmed_group.label, cluster.object_pose)
+                self._refresh_daily_map_summary(msg)
+                continue
             if not self._cooldown_ready(confirmed_group.label, cluster.object_pose):
                 continue
             try:

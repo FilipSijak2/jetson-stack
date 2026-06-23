@@ -14,7 +14,7 @@ set -euo pipefail
 : "${JETSON_ARTIFACT_ROOT:=/home/jetson/anomaly_logs}"
 : "${JETSON_LOG_DIR:=/workspace/logs}"
 : "${SAVE_PER_EVENT_IMAGES:=1}"
-: "${ANOMALY_MIN_OBSERVATIONS:=3}"
+: "${ANOMALY_MIN_OBSERVATIONS:=2}"
 : "${REPORTED_MERGE_RADIUS_M:=2.00}"
 : "${USE_DEPTH_DISTANCE:=1}"
 
