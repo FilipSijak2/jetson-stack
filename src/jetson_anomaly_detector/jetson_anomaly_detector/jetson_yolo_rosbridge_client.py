@@ -620,6 +620,15 @@ def _distance_xy(first: ObjectPoseMap, second: ObjectPoseMap) -> float:
     return float(np.hypot(first.x - second.x, first.y - second.y))
 
 
+def _blend_pose(current: ObjectPoseMap, new_pose: ObjectPoseMap, new_weight: float) -> ObjectPoseMap:
+    current_weight = 1.0 - new_weight
+    return ObjectPoseMap(
+        x=(current.x * current_weight) + (new_pose.x * new_weight),
+        y=(current.y * current_weight) + (new_pose.y * new_weight),
+        z=(current.z * current_weight) + (new_pose.z * new_weight),
+    )
+
+
 def _slug(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_") or "anomaly"
 
