@@ -69,6 +69,7 @@ class AppConfig:
     marker_ttl_s: float = 180.0
     marker_republish_hz: float = 1.0
     cluster_merge_radius_m: float = 1.00
+    marker_association_radius_m: float = 2.00
     reported_merge_radius_m: float = 2.00
     anomaly_min_observations: int = 2
     anomaly_confirmation_ttl_s: float = 6.0
@@ -128,6 +129,7 @@ ENV_OVERRIDES = {
     "marker_ttl_s": ("MARKER_TTL_S", _env_float),
     "marker_republish_hz": ("MARKER_REPUBLISH_HZ", _env_float),
     "cluster_merge_radius_m": ("CLUSTER_MERGE_RADIUS_M", _env_float),
+    "marker_association_radius_m": ("MARKER_ASSOCIATION_RADIUS_M", _env_float),
     "reported_merge_radius_m": ("REPORTED_MERGE_RADIUS_M", _env_float),
     "anomaly_min_observations": ("ANOMALY_MIN_OBSERVATIONS", _env_int),
     "anomaly_confirmation_ttl_s": ("ANOMALY_CONFIRMATION_TTL_S", _env_float),
@@ -199,8 +201,12 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["debug_image_publish_hz"] = max(0.1, float(normalized.get("debug_image_publish_hz", 2.0)))
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
     normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))
-    normalized["reported_merge_radius_m"] = max(
+    normalized["marker_association_radius_m"] = max(
         normalized["cluster_merge_radius_m"],
+        float(normalized.get("marker_association_radius_m", 2.00)),
+    )
+    normalized["reported_merge_radius_m"] = max(
+        normalized["marker_association_radius_m"],
         float(normalized.get("reported_merge_radius_m", 2.00)),
     )
     normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 2)))

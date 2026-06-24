@@ -25,6 +25,7 @@ detection_cooldown_s: 5.0
 marker_ttl_s: 180.0
 marker_republish_hz: 1.0
 cluster_merge_radius_m: 1.00
+marker_association_radius_m: 2.00
 reported_merge_radius_m: 2.00
 anomaly_min_observations: 2
 anomaly_confirmation_ttl_s: 6.0

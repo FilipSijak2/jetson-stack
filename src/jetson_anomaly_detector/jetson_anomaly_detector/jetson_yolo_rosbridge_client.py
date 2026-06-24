@@ -83,6 +83,7 @@ class JetsonYoloRosbridgeClient:
         self.markers = MarkerManager(
             frame_id=config.map_frame_id,
             merge_radius_m=config.cluster_merge_radius_m,
+            association_radius_m=config.marker_association_radius_m,
             object_marker_size_m=config.marker_object_size_m,
             text_height_m=config.marker_text_height_m,
             text_z_offset_m=config.marker_text_z_offset_m,
@@ -153,6 +154,7 @@ class JetsonYoloRosbridgeClient:
         self.rosbridge.advertise(self.config.marker_topic, "visualization_msgs/MarkerArray")
         self.rosbridge.advertise(self.config.debug_image_topic, "sensor_msgs/CompressedImage")
         self.rosbridge.advertise(self.config.map_snapshot_topic, "sensor_msgs/CompressedImage")
+        self._clear_existing_markers()
 
         LOGGER.info(
             "Subscribed camera=%s depth=%s map=%s pose=%s scan=%s depth_distance=%s laser_distance=%s",
@@ -655,6 +657,9 @@ class JetsonYoloRosbridgeClient:
     def _publish_event(self, event: Dict[str, Any]) -> None:
         self.rosbridge.publish(self.config.event_topic, {"data": json.dumps(event, separators=(",", ":"))})
         self.rosbridge.publish(self.config.readable_event_topic, {"data": build_readable_event(event)})
+
+    def _clear_existing_markers(self) -> None:
+        self.rosbridge.publish(self.config.marker_topic, self.markers.build_delete_all_marker_array())
 
     def _publish_debug_image(self, image: np.ndarray, source_msg: Dict[str, Any]) -> None:
         header = source_msg.get("header") or {}

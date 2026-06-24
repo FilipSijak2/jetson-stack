@@ -11,6 +11,7 @@ from .ros_messages import ros_time_now
 
 MARKER_ADD = 0
 MARKER_DELETE = 2
+MARKER_DELETE_ALL = 3
 MARKER_CUBE = 1
 MARKER_TEXT_VIEW_FACING = 9
 TEXT_MARKER_HEIGHT_M = 0.08
@@ -34,13 +35,18 @@ class MarkerManager:
         self,
         frame_id: str = "map",
         merge_radius_m: float = 0.20,
+        association_radius_m: Optional[float] = None,
         object_marker_size_m: float = OBJECT_MARKER_SIZE_M,
         text_height_m: float = TEXT_MARKER_HEIGHT_M,
         text_z_offset_m: float = TEXT_MARKER_Z_OFFSET_M,
         text_show_count: bool = False,
     ) -> None:
         self.frame_id = frame_id
-        self.merge_radius_m = merge_radius_m
+        self.merge_radius_m = max(0.01, float(merge_radius_m))
+        self.association_radius_m = max(
+            self.merge_radius_m,
+            float(association_radius_m) if association_radius_m is not None else self.merge_radius_m,
+        )
         self.object_marker_size_m = max(0.05, float(object_marker_size_m))
         self.text_height_m = max(0.01, float(text_height_m))
         self.text_z_offset_m = max(0.0, float(text_z_offset_m))
@@ -72,8 +78,8 @@ class MarkerManager:
             self.next_marker_base_id += 2
             self.active[cluster.cluster_id] = cluster
         else:
-            cluster.object_pose = self._blend_pose(cluster.object_pose, object_pose)
-            cluster.count = max(cluster.count, observed_count)
+            cluster.object_pose = self._blend_pose(cluster.object_pose, object_pose, new_weight=0.20)
+            cluster.count += max(1, observed_count)
             cluster.expires_at = time.monotonic() + ttl_s
             cluster.ttl_s = ttl_s
 
@@ -92,6 +98,10 @@ class MarkerManager:
             markers.append(self._delete_marker(marker_id, stamp))
         return {"markers": markers}
 
+    def build_delete_all_marker_array(self) -> Dict[str, Any]:
+        self.delete_queue.clear()
+        return {"markers": [self._delete_all_marker(ros_time_now())]}
+
     def summaries(self) -> List[AnomalyClusterSummary]:
         return [self._summary(cluster) for cluster in self.active.values()]
 
@@ -102,7 +112,7 @@ class MarkerManager:
             if cluster.label != label:
                 continue
             distance = math.hypot(cluster.object_pose.x - object_pose.x, cluster.object_pose.y - object_pose.y)
-            if distance <= self.merge_radius_m and distance < nearest_distance:
+            if distance <= self.association_radius_m and distance < nearest_distance:
                 nearest = cluster
                 nearest_distance = distance
         return nearest
@@ -118,10 +128,10 @@ class MarkerManager:
                     target.object_pose.x - candidate.object_pose.x,
                     target.object_pose.y - candidate.object_pose.y,
                 )
-                if distance > self.merge_radius_m:
+                if distance > self.association_radius_m:
                     continue
-                target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose)
-                target.count = max(target.count, candidate.count)
+                target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose, new_weight=0.5)
+                target.count += candidate.count
                 target.expires_at = max(target.expires_at, candidate.expires_at)
                 target.ttl_s = max(target.ttl_s, candidate.ttl_s)
                 self.active.pop(cluster_id, None)
@@ -193,6 +203,11 @@ class MarkerManager:
             "lifetime": {"sec": 0, "nanosec": 0},
         }
 
+    def _delete_all_marker(self, stamp: Dict[str, int]) -> Dict[str, Any]:
+        msg = self._delete_marker(0, stamp)
+        msg["action"] = MARKER_DELETE_ALL
+        return msg
+
     def _summary(self, cluster: ActiveCluster) -> AnomalyClusterSummary:
         return AnomalyClusterSummary(
             cluster_id=cluster.cluster_id,
@@ -201,11 +216,13 @@ class MarkerManager:
             count=cluster.count,
         )
 
-    def _blend_pose(self, current: ObjectPoseMap, new_pose: ObjectPoseMap) -> ObjectPoseMap:
+    def _blend_pose(self, current: ObjectPoseMap, new_pose: ObjectPoseMap, new_weight: float) -> ObjectPoseMap:
+        new_weight = max(0.0, min(1.0, float(new_weight)))
+        current_weight = 1.0 - new_weight
         return ObjectPoseMap(
-            x=(current.x + new_pose.x) * 0.5,
-            y=(current.y + new_pose.y) * 0.5,
-            z=(current.z + new_pose.z) * 0.5,
+            x=(current.x * current_weight) + (new_pose.x * new_weight),
+            y=(current.y * current_weight) + (new_pose.y * new_weight),
+            z=(current.z * current_weight) + (new_pose.z * new_weight),
         )
 
     def _label_text(self, cluster: ActiveCluster) -> str:

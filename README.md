@@ -63,7 +63,8 @@ LASER_WINDOW_DEG=6
 ANOMALY_CLASSES=bottle
 CONFIDENCE_THRESHOLD=0.5
 DETECTION_COOLDOWN_S=5
-CLUSTER_MERGE_RADIUS_M=0.20
+CLUSTER_MERGE_RADIUS_M=1.00
+MARKER_ASSOCIATION_RADIUS_M=2.00
 REPORTED_MERGE_RADIUS_M=2.00
 ANOMALY_MIN_OBSERVATIONS=2
 ANOMALY_CONFIRMATION_TTL_S=6.0
@@ -99,10 +100,12 @@ one map square and marker text shows the observed count, for example
 `bottle x3`. A map marker/event is created only after
 `ANOMALY_MIN_OBSERVATIONS` spatially consistent observations within
 `ANOMALY_CONFIRMATION_TTL_S`, which filters one-frame pose jumps from the
-camera-to-map projection. Already reported objects are de-duplicated with
-`REPORTED_MERGE_RADIUS_M`, intentionally a little wider than the live marker
-merge radius. By default Jetson saves original/annotated camera images for
-each new event and keeps a daily map summary at
+camera-to-map projection. Live markers use the wider
+`MARKER_ASSOCIATION_RADIUS_M` to keep one noisy physical object on one stable
+marker ID. Already reported objects are de-duplicated with
+`REPORTED_MERGE_RADIUS_M`, intentionally at least as wide as the live marker
+association radius. By default Jetson saves original/annotated camera images
+for each new event and keeps a daily map summary at
 `/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` as new
 anomaly clusters are detected.
 
