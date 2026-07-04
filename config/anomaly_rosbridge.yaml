@@ -17,6 +17,10 @@ detection_3d_topic: /anomaly/detections_3d
 detection_3d_frame_id: ""
 debug_image_topic: /anomaly/debug_image/compressed
 privacy_image_topic: /anomaly/privacy_image/compressed
+inspection_request_topic: /anomaly/inspection/request
+inspection_status_topic: /anomaly/inspection/status
+inspection_result_topic: /anomaly/inspection/result
+inspection_privacy_image_topic: /anomaly/inspection/privacy_image/compressed
 map_snapshot_topic: /anomaly/map_snapshot/compressed
 
 artifact_root: /home/jetson/anomaly_logs
@@ -28,15 +32,17 @@ confidence_threshold: 0.5
 detection_cooldown_s: 5.0
 marker_ttl_s: 180.0
 marker_republish_hz: 1.0
-cluster_merge_radius_m: 1.00
-marker_association_radius_m: 2.00
-reported_merge_radius_m: 2.00
+cluster_merge_radius_m: 0.25
+marker_association_radius_m: 0.40
+reported_merge_radius_m: 0.45
 anomaly_min_observations: 2
 anomaly_confirmation_ttl_s: 6.0
 marker_object_size_m: 0.20
 marker_text_height_m: 0.08
 marker_text_z_offset_m: 0.18
 marker_text_show_count: false
+marker_text_compact: true
+tracked_object_min_separation_m: 0.01
 
 default_anomaly_distance_m: 1.5
 camera_horizontal_fov_deg: 69.0
@@ -91,6 +97,21 @@ privacy_use_segmentation_masks: true
 privacy_draw_track_id: true
 privacy_draw_mask_overlay: true
 privacy_mask_overlay_alpha: 0.25
+
+# Autonomous close-up inspection. Keep disabled until both Jetson and nav_cont
+# settings are enabled and the robot has been tested in a clear area.
+inspection_enabled: false
+inspection_standoff_m: 0.70
+inspection_min_distance_m: 0.40
+inspection_max_distance_m: 3.0
+inspection_max_uncertainty_m: 0.30
+inspection_require_metric_distance: true
+inspection_capture_frames: 8
+inspection_capture_timeout_s: 8.0
+inspection_request_timeout_s: 70.0
+inspection_jpeg_quality: 95
+inspection_once_per_cluster: true
+inspection_retry_cooldown_s: 60.0
 marker_ray_enabled: true
 marker_ray_ttl_s: 2.0
 marker_uncertainty_enabled: true
@@ -108,4 +129,9 @@ detection_3d_upper_percentile: 95.0
 detection_3d_sample_stride: 2
 detection_3d_minimum_thickness_m: 0.05
 detection_3d_line_width_m: 0.01
+detection_3d_text_enabled: true
+detection_3d_text_height_m: 0.035
+detection_3d_text_show_label: false
+detection_3d_text_show_confidence: false
+detection_3d_text_show_distance: true
 map_frame_id: map

@@ -79,6 +79,28 @@ class PendingAnomaly:
     track_id: Optional[int] = None
 
 
+@dataclass
+class ReportedAnomaly:
+    label: str
+    object_pose: ObjectPoseMap
+    track_id: Optional[int] = None
+
+
+@dataclass
+class InspectionCaptureState:
+    request_id: str
+    cluster_id: str
+    label: str
+    object_pose: ObjectPoseMap
+    track_id: Optional[int]
+    target_frames: int
+    deadline: float
+    frames_seen: int = 0
+    best_score: float = -1.0
+    best_image: Optional[np.ndarray] = None
+    best_source_msg: Optional[Dict[str, Any]] = None
+
+
 class JetsonYoloRosbridgeClient:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -87,10 +109,14 @@ class JetsonYoloRosbridgeClient:
         self.annotated_dir = self.artifact_root / "images" / "annotated"
         self.map_dir = self.artifact_root / "map_images"
         self.daily_map_dir = self.map_dir / "daily"
+        self.inspection_dir = self.artifact_root / "images" / "inspection"
         self.event_log_path = self.artifact_root / "events.jsonl"
+        self.inspection_log_path = self.artifact_root / "inspections.jsonl"
         paths = [self.map_dir, self.daily_map_dir]
         if config.save_per_event_images:
             paths.extend([self.original_dir, self.annotated_dir])
+        if config.inspection_enabled:
+            paths.append(self.inspection_dir)
         for path in paths:
             path.mkdir(parents=True, exist_ok=True)
 
@@ -122,6 +148,8 @@ class JetsonYoloRosbridgeClient:
             text_height_m=config.marker_text_height_m,
             text_z_offset_m=config.marker_text_z_offset_m,
             text_show_count=config.marker_text_show_count,
+            text_compact=config.marker_text_compact,
+            tracked_object_min_separation_m=config.tracked_object_min_separation_m,
             ray_enabled=config.marker_ray_enabled,
             ray_ttl_s=config.marker_ray_ttl_s,
             uncertainty_enabled=config.marker_uncertainty_enabled,
@@ -138,7 +166,7 @@ class JetsonYoloRosbridgeClient:
         self.depth_buffer = deque(maxlen=config.depth_buffer_size)
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
-        self.reported_anomalies: List[tuple[str, ObjectPoseMap]] = []
+        self.reported_anomalies: List[ReportedAnomaly] = []
         self.pending_anomalies: List[PendingAnomaly] = []
         self.daily_clusters: Dict[str, AnomalyClusterSummary] = {}
         self.frame_count = 0
@@ -155,6 +183,12 @@ class JetsonYoloRosbridgeClient:
         self.last_missing_map_log = 0.0
         self.last_missing_scan_log = 0.0
         self.last_event_gate_log: Dict[str, float] = {}
+        self.inspection_sequence = 0
+        self.inspection_pending: Dict[str, Dict[str, Any]] = {}
+        self.inspection_capture: Optional[InspectionCaptureState] = None
+        self.inspection_retry_after: Dict[str, float] = {}
+        self.inspected_locations: List[ReportedAnomaly] = []
+        self._load_inspected_locations()
 
     def run_forever(self) -> None:
         while not self.stop_requested:
@@ -200,6 +234,12 @@ class JetsonYoloRosbridgeClient:
         if self.config.robot_pose_topic == "/amcl_pose":
             pose_type = "geometry_msgs/PoseWithCovarianceStamped"
         self.rosbridge.subscribe(self.config.robot_pose_topic, pose_type, queue_length=1, throttle_rate=500)
+        if self.config.inspection_enabled:
+            self.rosbridge.subscribe(
+                self.config.inspection_status_topic,
+                "std_msgs/String",
+                queue_length=10,
+            )
 
         self.rosbridge.advertise(self.config.event_topic, "std_msgs/String")
         self.rosbridge.advertise(self.config.readable_event_topic, "std_msgs/String")
@@ -213,6 +253,17 @@ class JetsonYoloRosbridgeClient:
         if self.config.privacy_image_enabled:
             self.rosbridge.advertise(
                 self.config.privacy_image_topic, "sensor_msgs/CompressedImage"
+            )
+        if self.config.inspection_enabled:
+            self.rosbridge.advertise(
+                self.config.inspection_request_topic, "std_msgs/String"
+            )
+            self.rosbridge.advertise(
+                self.config.inspection_result_topic, "std_msgs/String"
+            )
+            self.rosbridge.advertise(
+                self.config.inspection_privacy_image_topic,
+                "sensor_msgs/CompressedImage",
             )
         self.rosbridge.advertise(self.config.map_snapshot_topic, "sensor_msgs/CompressedImage")
         self._clear_existing_markers()
@@ -249,6 +300,16 @@ class JetsonYoloRosbridgeClient:
             ),
             self.config.map_snapshot_topic,
         )
+        if self.config.inspection_enabled:
+            LOGGER.info(
+                "Inspection enabled request=%s status=%s result=%s "
+                "standoff=%.2fm capture_frames=%d",
+                self.config.inspection_request_topic,
+                self.config.inspection_status_topic,
+                self.config.inspection_result_topic,
+                self.config.inspection_standoff_m,
+                self.config.inspection_capture_frames,
+            )
 
     def _event_loop(self) -> None:
         self.next_marker_publish = time.monotonic()
@@ -279,6 +340,11 @@ class JetsonYoloRosbridgeClient:
             self._on_pose(msg)
         elif topic == self.config.scan_topic:
             self._on_scan(msg)
+        elif (
+            self.config.inspection_enabled
+            and topic == self.config.inspection_status_topic
+        ):
+            self._on_inspection_status(msg)
 
     def _on_map(self, msg: Dict[str, Any]) -> None:
         try:
@@ -323,6 +389,407 @@ class JetsonYoloRosbridgeClient:
                 intrinsics.height,
             )
 
+    def _maybe_request_inspection(
+        self,
+        group: DetectionGroup,
+        cluster: AnomalyClusterSummary,
+    ) -> None:
+        if not self.config.inspection_enabled:
+            return
+        if self.inspection_pending or self.inspection_capture is not None:
+            return
+
+        estimate = group.distance_estimate
+        if (
+            estimate.distance_m < self.config.inspection_min_distance_m
+            or estimate.distance_m > self.config.inspection_max_distance_m
+        ):
+            return
+        if (
+            self.config.inspection_require_metric_distance
+            and estimate.source not in {"depth", "laser"}
+        ):
+            self._log_event_gate("inspection_requires_depth_or_laser", group)
+            return
+        if (
+            estimate.uncertainty_m is None
+            or estimate.uncertainty_m > self.config.inspection_max_uncertainty_m
+        ):
+            self._log_event_gate("inspection_uncertainty_too_high", group)
+            return
+
+        track_id = _best_track_id(group.detections)
+        if (
+            self.config.inspection_once_per_cluster
+            and self._inspection_already_completed(
+                group.label, group.object_pose, track_id
+            )
+        ):
+            return
+        retry_key = self._inspection_location_key(group.label, group.object_pose)
+        if time.monotonic() < self.inspection_retry_after.get(retry_key, 0.0):
+            return
+
+        robot_pose = self.latest_pose
+        if robot_pose is None:
+            return
+        self.inspection_sequence += 1
+        request_id = (
+            f"inspect_{self.current_daily_key.replace('-', '')}_"
+            f"{self.inspection_sequence:05d}"
+        )
+        request = {
+            "request_id": request_id,
+            "cluster_id": cluster.cluster_id,
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "label": group.label,
+            "track_id": track_id,
+            "object_pose_map": {
+                "x": group.object_pose.x,
+                "y": group.object_pose.y,
+                "z": group.object_pose.z,
+            },
+            "robot_pose_map": {
+                "x": robot_pose.x,
+                "y": robot_pose.y,
+                "yaw": robot_pose.yaw,
+            },
+            "localization": {
+                "distance_m": estimate.distance_m,
+                "distance_source": estimate.source,
+                "distance_uncertainty_m": estimate.uncertainty_m,
+            },
+            "standoff_m": self.config.inspection_standoff_m,
+        }
+        self.inspection_pending[request_id] = {
+            "request": request,
+            "object_pose": group.object_pose,
+            "track_id": track_id,
+            "retry_key": retry_key,
+            "deadline": time.monotonic()
+            + self.config.inspection_request_timeout_s,
+        }
+        self.rosbridge.publish(
+            self.config.inspection_request_topic,
+            {"data": json.dumps(request, separators=(",", ":"))},
+        )
+        LOGGER.info(
+            "Inspection %s requested for %s track_id=%s at map=(%.2f, %.2f) "
+            "distance=%.2fm source=%s",
+            request_id,
+            group.label,
+            track_id if track_id is not None else "-",
+            group.object_pose.x,
+            group.object_pose.y,
+            estimate.distance_m,
+            estimate.source,
+        )
+
+    def _on_inspection_status(self, msg: Dict[str, Any]) -> None:
+        try:
+            status = json.loads(str(msg.get("data") or ""))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            LOGGER.warning("Ignoring malformed inspection status: %r", msg.get("data"))
+            return
+        if not isinstance(status, dict):
+            return
+        request_id = str(status.get("request_id") or "")
+        state = str(status.get("state") or "")
+        metadata = self.inspection_pending.get(request_id)
+        if metadata is None:
+            return
+        LOGGER.info(
+            "Inspection %s state=%s reason=%s",
+            request_id,
+            state,
+            status.get("reason") or "-",
+        )
+
+        if state == "capture_requested":
+            if self.inspection_capture is not None:
+                return
+            request = metadata["request"]
+            self.inspection_capture = InspectionCaptureState(
+                request_id=request_id,
+                cluster_id=str(request["cluster_id"]),
+                label=str(request["label"]),
+                object_pose=metadata["object_pose"],
+                track_id=metadata["track_id"],
+                target_frames=self.config.inspection_capture_frames,
+                deadline=time.monotonic()
+                + self.config.inspection_capture_timeout_s,
+            )
+            return
+
+        if state in {"rejected", "failed", "canceled", "timeout", "capture_failed"}:
+            self.inspection_retry_after[metadata["retry_key"]] = (
+                time.monotonic() + self.config.inspection_retry_cooldown_s
+            )
+            self.inspection_pending.pop(request_id, None)
+            if (
+                self.inspection_capture is not None
+                and self.inspection_capture.request_id == request_id
+            ):
+                self.inspection_capture = None
+        elif state == "completed":
+            self.inspection_pending.pop(request_id, None)
+
+    def _expire_stale_inspection_request(self) -> None:
+        if self.inspection_capture is not None:
+            return
+        now = time.monotonic()
+        for request_id, metadata in list(self.inspection_pending.items()):
+            if now < float(metadata.get("deadline", now + 1.0)):
+                continue
+            self.inspection_retry_after[metadata["retry_key"]] = (
+                now + self.config.inspection_retry_cooldown_s
+            )
+            self.inspection_pending.pop(request_id, None)
+            LOGGER.warning(
+                "Inspection %s expired without a terminal coordinator status",
+                request_id,
+            )
+
+    def _capture_inspection_frame_if_active(
+        self,
+        detections: List[Detection],
+        frame: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> None:
+        capture = self.inspection_capture
+        if capture is None:
+            return
+        if time.monotonic() >= capture.deadline:
+            self._finish_inspection_capture(False, "capture_timeout")
+            return
+
+        detection = self._select_inspection_detection(
+            capture, detections, frame.shape[1], frame.shape[0], source_msg
+        )
+        if detection is None:
+            return
+        privacy_frame = blur_except_detections(
+            frame,
+            [detection],
+            kernel_size=self.config.privacy_blur_kernel_size,
+            padding_ratio=self.config.privacy_bbox_padding_ratio,
+            use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+            draw_track_id=self.config.privacy_draw_track_id,
+            draw_mask_overlay=self.config.privacy_draw_mask_overlay,
+            mask_overlay_alpha=self.config.privacy_mask_overlay_alpha,
+        )
+        score = _detection_sharpness(frame, detection)
+        capture.frames_seen += 1
+        if score > capture.best_score:
+            capture.best_score = score
+            capture.best_image = privacy_frame.copy()
+            capture.best_source_msg = dict(source_msg)
+        if capture.frames_seen >= capture.target_frames:
+            self._finish_inspection_capture(True, "best_frame_selected")
+
+    def _select_inspection_detection(
+        self,
+        capture: InspectionCaptureState,
+        detections: List[Detection],
+        image_width: int,
+        image_height: int,
+        source_msg: Dict[str, Any],
+    ) -> Optional[Detection]:
+        candidates = [item for item in detections if item.label == capture.label]
+        if capture.track_id is not None:
+            tracked = [
+                item for item in candidates if item.track_id == capture.track_id
+            ]
+            if tracked:
+                return max(tracked, key=lambda item: item.confidence)
+
+        nearest: Optional[Detection] = None
+        nearest_distance = float("inf")
+        for candidate in candidates:
+            try:
+                located = self._locate_detection(
+                    candidate, image_width, image_height, source_msg
+                )
+            except Exception:
+                continue
+            distance = _distance_xy(located.object_pose, capture.object_pose)
+            if (
+                distance <= self.config.marker_association_radius_m
+                and distance < nearest_distance
+            ):
+                nearest = candidate
+                nearest_distance = distance
+        return nearest
+
+    def _finish_inspection_capture(self, success: bool, reason: str) -> None:
+        capture = self.inspection_capture
+        if capture is None:
+            return
+        metadata = self.inspection_pending.get(capture.request_id)
+        image_path: Optional[Path] = None
+        if success and capture.best_image is not None:
+            try:
+                image_path = (
+                    self.inspection_dir
+                    / self.current_daily_key
+                    / f"{capture.request_id}_{_slug(capture.label)}_privacy.jpg"
+                )
+                _write_image(
+                    image_path,
+                    capture.best_image,
+                    quality=self.config.inspection_jpeg_quality,
+                )
+                self._publish_inspection_privacy_image(
+                    capture.best_image,
+                    capture.best_source_msg or {},
+                )
+                inspected = ReportedAnomaly(
+                    capture.label, capture.object_pose, capture.track_id
+                )
+                self.inspected_locations.append(inspected)
+            except Exception as exc:
+                LOGGER.exception(
+                    "Inspection %s privacy image save failed: %s",
+                    capture.request_id,
+                    exc,
+                )
+                image_path = None
+                success = False
+                reason = f"capture_save_failed: {exc}"
+        else:
+            success = False
+
+        result = {
+            "request_id": capture.request_id,
+            "cluster_id": capture.cluster_id,
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "success": success,
+            "reason": reason,
+            "label": capture.label,
+            "track_id": capture.track_id,
+            "object_pose_map": {
+                "x": capture.object_pose.x,
+                "y": capture.object_pose.y,
+                "z": capture.object_pose.z,
+            },
+            "frames_evaluated": capture.frames_seen,
+            "sharpness_score": (
+                round(capture.best_score, 3) if capture.best_score >= 0.0 else None
+            ),
+            "privacy_image": str(image_path) if image_path is not None else None,
+        }
+        try:
+            self.inspection_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.inspection_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result, sort_keys=True) + "\n")
+        except OSError as exc:
+            LOGGER.error("Could not append inspection result log: %s", exc)
+        self.rosbridge.publish(
+            self.config.inspection_result_topic,
+            {"data": json.dumps(result, separators=(",", ":"))},
+        )
+        LOGGER.info(
+            "Inspection %s capture success=%s frames=%d sharpness=%s image=%s",
+            capture.request_id,
+            success,
+            capture.frames_seen,
+            result["sharpness_score"],
+            image_path or "-",
+        )
+        if not success and metadata is not None:
+            self.inspection_retry_after[metadata["retry_key"]] = (
+                time.monotonic() + self.config.inspection_retry_cooldown_s
+            )
+        self.inspection_capture = None
+
+    def _publish_inspection_privacy_image(
+        self,
+        image: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> None:
+        header = source_msg.get("header") or {}
+        encoded = encode_image(
+            image, ".jpg", quality=self.config.inspection_jpeg_quality
+        )
+        self.rosbridge.publish(
+            self.config.inspection_privacy_image_topic,
+            compressed_image_msg(
+                encoded,
+                "jpeg",
+                frame_id=header.get("frame_id") or "camera",
+                stamp=header.get("stamp"),
+            ),
+        )
+
+    def _inspection_location_key(
+        self, label: str, object_pose: ObjectPoseMap
+    ) -> str:
+        cell = max(0.05, self.config.reported_merge_radius_m)
+        return (
+            f"{label}:{round(object_pose.x / cell)}:"
+            f"{round(object_pose.y / cell)}"
+        )
+
+    def _inspection_already_completed(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int],
+    ) -> bool:
+        radius = max(0.05, self.config.reported_merge_radius_m)
+        for inspected in self.inspected_locations:
+            if inspected.label != label:
+                continue
+            distance = _distance_xy(inspected.object_pose, object_pose)
+            if (
+                track_id is not None
+                and inspected.track_id is not None
+                and track_id != inspected.track_id
+                and distance >= self.config.tracked_object_min_separation_m
+            ):
+                continue
+            if distance <= radius:
+                return True
+        return False
+
+    def _load_inspected_locations(self) -> None:
+        try:
+            lines = self.inspection_log_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            LOGGER.warning(
+                "Could not read inspection log %s: %s",
+                self.inspection_log_path,
+                exc,
+            )
+            return
+        for line in lines:
+            try:
+                result = json.loads(line)
+                if (
+                    not result.get("success")
+                    or _event_local_day_key(result) != self.current_daily_key
+                ):
+                    continue
+                pose = result["object_pose_map"]
+                track_id = result.get("track_id")
+                self.inspected_locations.append(
+                    ReportedAnomaly(
+                        str(result["label"]),
+                        ObjectPoseMap(
+                            float(pose["x"]),
+                            float(pose["y"]),
+                            float(pose.get("z", 0.0)),
+                        ),
+                        int(track_id) if track_id is not None else None,
+                    )
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+
     def _rollover_daily_state_if_needed(self) -> None:
         day = _local_day_key()
         if day == self.current_daily_key:
@@ -334,6 +801,8 @@ class JetsonYoloRosbridgeClient:
         self.daily_clusters.clear()
         self.last_event_clusters.clear()
         self.last_event_gate_log.clear()
+        self.inspected_locations.clear()
+        self.inspection_retry_after.clear()
         self.next_daily_summary_refresh = 0.0
         self._clear_existing_markers()
         self.markers.reset()
@@ -358,6 +827,8 @@ class JetsonYoloRosbridgeClient:
 
         detections = self.detector.detect(frame)
         anomalies = self._filter_anomalies(detections)
+        self._expire_stale_inspection_request()
+        self._capture_inspection_frame_if_active(anomalies, frame, msg)
         self._publish_debug_stream_if_due(anomalies, frame, msg)
         self._publish_privacy_stream_if_due(anomalies, frame, msg)
         self._publish_detection_3d_if_due(anomalies, frame, msg)
@@ -386,9 +857,15 @@ class JetsonYoloRosbridgeClient:
                 track_id=_best_track_id(confirmed_group.detections),
             )
             self.daily_clusters[cluster.cluster_id] = cluster
-            if self._already_reported(confirmed_group.label, cluster.object_pose):
+            self._maybe_request_inspection(confirmed_group, cluster)
+            track_id = _best_track_id(confirmed_group.detections)
+            if self._already_reported(
+                confirmed_group.label, cluster.object_pose, track_id
+            ):
                 self._log_event_gate("already_reported_today", confirmed_group)
-                self._remember_reported(confirmed_group.label, cluster.object_pose)
+                self._remember_reported(
+                    confirmed_group.label, cluster.object_pose, track_id
+                )
                 self._refresh_daily_map_summary(msg)
                 continue
             if not self._cooldown_ready(confirmed_group.label, cluster.object_pose):
@@ -465,6 +942,16 @@ class JetsonYoloRosbridgeClient:
                     continue
                 center = self._group_center(group)
                 distance = _distance_xy(center, item.object_pose)
+                group_track_id = _best_track_id(
+                    [group_item.detection for group_item in group]
+                )
+                if (
+                    item.detection.track_id is not None
+                    and group_track_id is not None
+                    and item.detection.track_id != group_track_id
+                    and distance >= self.config.tracked_object_min_separation_m
+                ):
+                    continue
                 if distance <= self.config.cluster_merge_radius_m:
                     target_group = group
                     break
@@ -588,6 +1075,13 @@ class JetsonYoloRosbridgeClient:
             if pending.label != label:
                 continue
             distance = _distance_xy(pending.object_pose, object_pose)
+            if (
+                track_id is not None
+                and pending.track_id is not None
+                and track_id != pending.track_id
+                and distance >= self.config.tracked_object_min_separation_m
+            ):
+                continue
             if distance <= radius and distance < nearest_distance:
                 nearest_index = index
                 nearest_distance = distance
@@ -614,23 +1108,54 @@ class JetsonYoloRosbridgeClient:
         cell = max(0.01, self.config.cluster_merge_radius_m)
         return f"{label}:{round(object_pose.x / cell)}:{round(object_pose.y / cell)}"
 
-    def _already_reported(self, label: str, object_pose: ObjectPoseMap) -> bool:
-        return self._reported_index(label, object_pose) is not None
+    def _already_reported(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int] = None,
+    ) -> bool:
+        return self._reported_index(label, object_pose, track_id) is not None
 
-    def _reported_index(self, label: str, object_pose: ObjectPoseMap) -> Optional[int]:
+    def _reported_index(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int] = None,
+    ) -> Optional[int]:
         radius = max(0.01, self.config.reported_merge_radius_m)
-        for index, (reported_label, reported_pose) in enumerate(self.reported_anomalies):
-            if reported_label == label and _distance_xy(reported_pose, object_pose) <= radius:
+        for index, reported in enumerate(self.reported_anomalies):
+            if reported.label != label:
+                continue
+            distance = _distance_xy(reported.object_pose, object_pose)
+            if (
+                track_id is not None
+                and reported.track_id is not None
+                and track_id != reported.track_id
+                and distance >= self.config.tracked_object_min_separation_m
+            ):
+                continue
+            if distance <= radius:
                 return index
         return None
 
-    def _remember_reported(self, label: str, object_pose: ObjectPoseMap) -> None:
-        index = self._reported_index(label, object_pose)
+    def _remember_reported(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int] = None,
+    ) -> None:
+        index = self._reported_index(label, object_pose, track_id)
         if index is None:
-            self.reported_anomalies.append((label, object_pose))
+            self.reported_anomalies.append(
+                ReportedAnomaly(label, object_pose, track_id)
+            )
         else:
-            _, previous_pose = self.reported_anomalies[index]
-            self.reported_anomalies[index] = (label, _blend_pose(previous_pose, object_pose, new_weight=0.25))
+            previous = self.reported_anomalies[index]
+            self.reported_anomalies[index] = ReportedAnomaly(
+                label,
+                _blend_pose(previous.object_pose, object_pose, new_weight=0.25),
+                track_id if track_id is not None else previous.track_id,
+            )
 
     def _load_reported_anomalies(self) -> None:
         try:
@@ -664,6 +1189,8 @@ class JetsonYoloRosbridgeClient:
 
             try:
                 label = str(event.get("label") or "")
+                track_id = event.get("track_id")
+                track_id = int(track_id) if track_id is not None else None
                 pose = event.get("object_pose_map") or {}
                 object_pose = ObjectPoseMap(
                     x=float(pose["x"]),
@@ -676,7 +1203,7 @@ class JetsonYoloRosbridgeClient:
 
             if label:
                 before = len(self.reported_anomalies)
-                self._remember_reported(label, object_pose)
+                self._remember_reported(label, object_pose, track_id)
                 if len(self.reported_anomalies) > before:
                     loaded += 1
 
@@ -718,7 +1245,11 @@ class JetsonYoloRosbridgeClient:
         refreshed_summary = self._refresh_daily_map_summary(
             source_msg,
             force=True,
-            extra_reported=(group.label, cluster.object_pose),
+            extra_reported=ReportedAnomaly(
+                group.label,
+                cluster.object_pose,
+                _best_track_id(group.detections),
+            ),
         )
         if refreshed_summary is not None:
             snapshot_path, _snapshot_image = refreshed_summary
@@ -741,7 +1272,11 @@ class JetsonYoloRosbridgeClient:
             event_log=self.event_log_path,
         )
         self.event_writer.append(event)
-        self._remember_reported(group.label, cluster.object_pose)
+        self._remember_reported(
+            group.label,
+            cluster.object_pose,
+            _best_track_id(group.detections),
+        )
         self._publish_event(event)
         self._publish_debug_image(annotate_frame(frame.copy(), group.detections), source_msg)
         self._mark_cooldown(group.label, cluster.object_pose)
@@ -975,6 +1510,11 @@ class JetsonYoloRosbridgeClient:
             stamp=header.get("stamp"),
             ttl_s=self.config.detection_3d_ttl_s,
             line_width_m=self.config.detection_3d_line_width_m,
+            text_enabled=self.config.detection_3d_text_enabled,
+            text_height_m=self.config.detection_3d_text_height_m,
+            text_show_label=self.config.detection_3d_text_show_label,
+            text_show_confidence=self.config.detection_3d_text_show_confidence,
+            text_show_distance=self.config.detection_3d_text_show_distance,
         )
         self.rosbridge.publish(self.config.detection_3d_topic, marker_array)
 
@@ -983,28 +1523,31 @@ class JetsonYoloRosbridgeClient:
 
     def _reported_summaries(
         self,
-        extra_reported: Optional[tuple[str, ObjectPoseMap]] = None,
+        extra_reported: Optional[ReportedAnomaly] = None,
     ) -> List[AnomalyClusterSummary]:
         reported = list(self.reported_anomalies)
         if extra_reported is not None:
-            label, pose = extra_reported
-            if self._reported_index(label, pose) is None:
+            if self._reported_index(
+                extra_reported.label,
+                extra_reported.object_pose,
+                extra_reported.track_id,
+            ) is None:
                 reported.append(extra_reported)
         return [
             AnomalyClusterSummary(
                 cluster_id=f"reported_{index:05d}",
-                label=label,
-                object_pose=pose,
+                label=item.label,
+                object_pose=item.object_pose,
                 count=1,
             )
-            for index, (label, pose) in enumerate(reported, start=1)
+            for index, item in enumerate(reported, start=1)
         ]
 
     def _refresh_daily_map_summary(
         self,
         source_msg: Dict[str, Any],
         force: bool = False,
-        extra_reported: Optional[tuple[str, ObjectPoseMap]] = None,
+        extra_reported: Optional[ReportedAnomaly] = None,
     ) -> Optional[tuple[Path, np.ndarray]]:
         if not self.config.daily_map_summary:
             return None
@@ -1246,9 +1789,34 @@ def _best_track_id(detections: List[Detection]) -> Optional[int]:
     return max(tracked, key=lambda item: item.confidence).track_id
 
 
-def _write_image(path: Path, image: np.ndarray) -> None:
+def _detection_sharpness(frame: np.ndarray, detection: Detection) -> float:
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in detection.bbox_xyxy]
+    x1, x2 = max(0, min(width, x1)), max(0, min(width, x2))
+    y1, y2 = max(0, min(height, y1)), max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    crop = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    mask = _normalized_detection_mask(detection, height, width)
+    crop_mask = mask[y1:y2, x1:x2].astype(np.uint8) if mask is not None else None
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    if crop_mask is not None and np.count_nonzero(crop_mask) >= 9:
+        values = laplacian[crop_mask > 0]
+        return float(np.var(values))
+    return float(laplacian.var())
+
+
+def _write_image(
+    path: Path,
+    image: np.ndarray,
+    quality: Optional[int] = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image):
+    params = []
+    if quality is not None and path.suffix.lower() in {".jpg", ".jpeg"}:
+        params = [int(cv2.IMWRITE_JPEG_QUALITY), max(1, min(100, int(quality)))]
+    if not cv2.imwrite(str(path), image, params):
         raise ValueError(f"Failed to write image: {path}")
 
 

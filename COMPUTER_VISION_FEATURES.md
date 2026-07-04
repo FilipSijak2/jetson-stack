@@ -57,6 +57,11 @@ detection_3d_upper_percentile: 95.0
 detection_3d_sample_stride: 2
 detection_3d_minimum_thickness_m: 0.05
 detection_3d_line_width_m: 0.01
+detection_3d_text_enabled: true
+detection_3d_text_height_m: 0.035
+detection_3d_text_show_label: false
+detection_3d_text_show_confidence: false
+detection_3d_text_show_distance: true
 ```
 
 Iste postavke postoje u
@@ -296,6 +301,84 @@ event_gate=cooldown
 Uspješan event ispisuje putanje originalne slike, anotirane slike i daily
 karte. Lokacija se označava prijavljenom tek nakon uspješnog zapisa eventa, pa
 greška pri spremanju ne blokira sljedeći pokušaj.
+
+## Automatski prilazak i kvalitetna privacy fotografija
+
+Opcionalni inspection workflow povezuje potvrdenu YOLO detekciju s Nav2
+navigacijom:
+
+1. detekcija mora proci postojeca `anomaly_min_observations: 2`
+1. Jetson prihvaca samo depth/laser lokalizaciju s nesigurnoscu do `0.30 m`
+1. Raspberry racuna goal na zadanoj standoff udaljenosti, okrenut prema boci
+1. zahtjev se odbija ako je robot u manual modu ili izvrsava drugi goal
+1. nakon dolaska robot miruje `1 s`
+1. Jetson bira najoštriji od 8 privacy kadrova
+1. spremljena lokacija se vise ne pregledava isti dan
+
+Funkcija je zadano iskljucena. Za ukljucivanje na Jetsonu postaviti u
+`config/anomaly_rosbridge.yaml`:
+
+```yaml
+inspection_enabled: true
+inspection_standoff_m: 0.70
+inspection_min_distance_m: 0.40
+inspection_max_distance_m: 3.0
+inspection_max_uncertainty_m: 0.30
+inspection_require_metric_distance: true
+inspection_capture_frames: 8
+inspection_capture_timeout_s: 8.0
+inspection_request_timeout_s: 70.0
+inspection_jpeg_quality: 95
+inspection_once_per_cluster: true
+inspection_retry_cooldown_s: 60.0
+```
+
+Budući da environment ima prednost, u
+`config/containers/jetson_anomaly.env` treba postaviti:
+
+```env
+INSPECTION_ENABLED=1
+```
+
+Na Raspberryju u `config/containers/nav_cont.env`:
+
+```env
+ENABLE_ANOMALY_INSPECTION=1
+INSPECTION_ONLY_WHEN_IDLE=true
+INSPECTION_DEFAULT_STANDOFF_M=0.70
+```
+
+Inspection koristi topice:
+
+- `/anomaly/inspection/request`
+- `/anomaly/inspection/status`
+- `/anomaly/inspection/result`
+- `/anomaly/inspection/privacy_image/compressed`
+
+Snimke se spremaju u
+`anomaly_logs/images/inspection/<datum>/`, a rezultati u
+`anomaly_logs/inspections.jsonl`. Prebacivanje na joystick tijekom prilaska
+odmah otkazuje inspection goal.
+
+Za stvarno kvalitetniji ulaz Raspberry konfiguracija koristi
+`RS_COLOR_PROFILE=640x480x15` i `RS_COMPRESSED_JPEG_QUALITY=75`; konačna
+inspection fotografija sprema se s JPEG kvalitetom 95.
+
+## Odvajanje vise boca i citljiviji markeri
+
+Razliciti aktivni `track_id`-evi vise se ne spajaju u srednju lokaciju. Zadani
+prostorni pragovi sada su:
+
+```yaml
+cluster_merge_radius_m: 0.25
+marker_association_radius_m: 0.40
+reported_merge_radius_m: 0.45
+tracked_object_min_separation_m: 0.01
+```
+
+3D box svake boce dobiva stabilnu boju prema `track_id`-u. Tekst je smanjen s
+punog `bottle #149 0.83 0.75m` na citljiviji `#149 · 0.75 m`. Map marker koristi
+samo `#track_id`, pa se susjedne boce lakse razlikuju u Foxgloveu.
 
 ## Event JSON
 

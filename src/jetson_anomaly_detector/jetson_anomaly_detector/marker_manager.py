@@ -33,6 +33,11 @@ def build_detection_3d_marker_array(
     stamp: Optional[Dict[str, int]],
     ttl_s: float,
     line_width_m: float,
+    text_enabled: bool = True,
+    text_height_m: float = 0.06,
+    text_show_label: bool = True,
+    text_show_confidence: bool = True,
+    text_show_distance: bool = True,
 ) -> Dict[str, Any]:
     markers: List[Dict[str, Any]] = []
     marker_stamp = stamp or ros_time_now()
@@ -63,6 +68,7 @@ def build_detection_3d_marker_array(
             "action": MARKER_ADD,
             "lifetime": lifetime,
         }
+        color = _track_color(detection.track_id)
         markers.append(
             {
                 **common,
@@ -73,13 +79,24 @@ def build_detection_3d_marker_array(
                     "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
                 },
                 "scale": {"x": max(0.002, float(line_width_m)), "y": 0.0, "z": 0.0},
-                "color": {"r": 0.05, "g": 1.0, "b": 0.1, "a": 0.95},
+                "color": {**color, "a": 0.95},
                 "points": points,
             }
         )
+        if not text_enabled:
+            continue
         track_text = (
             f" #{detection.track_id}" if detection.track_id is not None else ""
         )
+        text_parts = []
+        if text_show_label:
+            text_parts.append(f"{detection.label}{track_text}")
+        elif detection.track_id is not None:
+            text_parts.append(f"#{detection.track_id}")
+        if text_show_confidence:
+            text_parts.append(f"{detection.confidence:.2f}")
+        if text_show_distance:
+            text_parts.append(f"{bounds.center_z:.2f} m")
         markers.append(
             {
                 **common,
@@ -93,15 +110,27 @@ def build_detection_3d_marker_array(
                     },
                     "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
                 },
-                "scale": {"x": 0.0, "y": 0.0, "z": 0.06},
-                "color": {"r": 0.1, "g": 1.0, "b": 0.1, "a": 1.0},
-                "text": (
-                    f"{detection.label}{track_text} {detection.confidence:.2f} "
-                    f"{bounds.center_z:.2f}m"
-                ),
+                "scale": {"x": 0.0, "y": 0.0, "z": max(0.01, float(text_height_m))},
+                "color": {**color, "a": 1.0},
+                "text": " · ".join(text_parts),
             }
         )
     return {"markers": markers}
+
+
+def _track_color(track_id: Optional[int]) -> Dict[str, float]:
+    """Return a stable bright color so adjacent tracked bottles stay readable."""
+    palette = (
+        (0.10, 1.00, 0.20),
+        (0.10, 0.75, 1.00),
+        (1.00, 0.35, 0.10),
+        (0.95, 0.20, 0.85),
+        (0.95, 0.85, 0.10),
+        (0.45, 0.35, 1.00),
+    )
+    index = 0 if track_id is None else abs(int(track_id)) % len(palette)
+    red, green, blue = palette[index]
+    return {"r": red, "g": green, "b": blue}
 
 
 def _bounding_box_corners(bounds: BoundingBox3D) -> List[Tuple[float, float, float]]:
@@ -143,6 +172,8 @@ class MarkerManager:
         text_height_m: float = TEXT_MARKER_HEIGHT_M,
         text_z_offset_m: float = TEXT_MARKER_Z_OFFSET_M,
         text_show_count: bool = False,
+        text_compact: bool = True,
+        tracked_object_min_separation_m: float = 0.01,
         ray_enabled: bool = True,
         ray_ttl_s: float = 2.0,
         uncertainty_enabled: bool = True,
@@ -161,6 +192,10 @@ class MarkerManager:
         self.text_height_m = max(0.01, float(text_height_m))
         self.text_z_offset_m = max(0.0, float(text_z_offset_m))
         self.text_show_count = bool(text_show_count)
+        self.text_compact = bool(text_compact)
+        self.tracked_object_min_separation_m = max(
+            0.01, float(tracked_object_min_separation_m)
+        )
         self.ray_enabled = bool(ray_enabled)
         self.ray_ttl_s = max(0.1, float(ray_ttl_s))
         self.uncertainty_enabled = bool(uncertainty_enabled)
@@ -186,7 +221,7 @@ class MarkerManager:
         uncertainty_m: Optional[float] = None,
         track_id: Optional[int] = None,
     ) -> AnomalyClusterSummary:
-        cluster = self._nearest_cluster(label, object_pose)
+        cluster = self._nearest_cluster(label, object_pose, track_id)
         if cluster is None:
             cluster = ActiveCluster(
                 cluster_id=f"cluster_{self.next_cluster_index:05d}",
@@ -251,13 +286,25 @@ class MarkerManager:
     def summaries(self) -> List[AnomalyClusterSummary]:
         return [self._summary(cluster) for cluster in self.active.values()]
 
-    def _nearest_cluster(self, label: str, object_pose: ObjectPoseMap) -> Optional[ActiveCluster]:
+    def _nearest_cluster(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int],
+    ) -> Optional[ActiveCluster]:
         nearest = None
         nearest_distance = float("inf")
         for cluster in self.active.values():
             if cluster.label != label:
                 continue
             distance = math.hypot(cluster.object_pose.x - object_pose.x, cluster.object_pose.y - object_pose.y)
+            if (
+                track_id is not None
+                and cluster.track_id is not None
+                and track_id != cluster.track_id
+                and distance >= self.tracked_object_min_separation_m
+            ):
+                continue
             if distance <= self.association_radius_m and distance < nearest_distance:
                 nearest = cluster
                 nearest_distance = distance
@@ -274,6 +321,13 @@ class MarkerManager:
                     target.object_pose.x - candidate.object_pose.x,
                     target.object_pose.y - candidate.object_pose.y,
                 )
+                if (
+                    target.track_id is not None
+                    and candidate.track_id is not None
+                    and target.track_id != candidate.track_id
+                    and distance >= self.tracked_object_min_separation_m
+                ):
+                    continue
                 if distance > self.association_radius_m:
                     continue
                 target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose, new_weight=0.5)
@@ -432,6 +486,11 @@ class MarkerManager:
         )
 
     def _label_text(self, cluster: ActiveCluster) -> str:
+        if self.text_compact and cluster.track_id is not None:
+            label = f"#{cluster.track_id}"
+            if self.text_show_count and cluster.count > 1:
+                label += f" x{cluster.count}"
+            return label
         label = cluster.label
         if cluster.track_id is not None:
             label += f" #{cluster.track_id}"

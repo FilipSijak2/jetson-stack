@@ -65,6 +65,10 @@ class AppConfig:
     detection_3d_frame_id: str = ""
     debug_image_topic: str = "/anomaly/debug_image/compressed"
     privacy_image_topic: str = "/anomaly/privacy_image/compressed"
+    inspection_request_topic: str = "/anomaly/inspection/request"
+    inspection_status_topic: str = "/anomaly/inspection/status"
+    inspection_result_topic: str = "/anomaly/inspection/result"
+    inspection_privacy_image_topic: str = "/anomaly/inspection/privacy_image/compressed"
     map_snapshot_topic: str = "/anomaly/map_snapshot/compressed"
     artifact_root: str = "/home/jetson/anomaly_logs"
     anomaly_classes: List[str] = None  # type: ignore[assignment]
@@ -81,6 +85,8 @@ class AppConfig:
     marker_text_height_m: float = 0.08
     marker_text_z_offset_m: float = 0.18
     marker_text_show_count: bool = False
+    marker_text_compact: bool = True
+    tracked_object_min_separation_m: float = 0.01
     default_anomaly_distance_m: float = 1.5
     camera_horizontal_fov_deg: float = 69.0
     camera_yaw_offset_deg: float = 0.0
@@ -133,6 +139,18 @@ class AppConfig:
     privacy_draw_track_id: bool = True
     privacy_draw_mask_overlay: bool = True
     privacy_mask_overlay_alpha: float = 0.25
+    inspection_enabled: bool = False
+    inspection_standoff_m: float = 0.70
+    inspection_min_distance_m: float = 0.40
+    inspection_max_distance_m: float = 3.0
+    inspection_max_uncertainty_m: float = 0.30
+    inspection_require_metric_distance: bool = True
+    inspection_capture_frames: int = 8
+    inspection_capture_timeout_s: float = 8.0
+    inspection_request_timeout_s: float = 70.0
+    inspection_jpeg_quality: int = 95
+    inspection_once_per_cluster: bool = True
+    inspection_retry_cooldown_s: float = 60.0
     marker_ray_enabled: bool = True
     marker_ray_ttl_s: float = 2.0
     marker_uncertainty_enabled: bool = True
@@ -150,6 +168,11 @@ class AppConfig:
     detection_3d_sample_stride: int = 2
     detection_3d_minimum_thickness_m: float = 0.05
     detection_3d_line_width_m: float = 0.01
+    detection_3d_text_enabled: bool = True
+    detection_3d_text_height_m: float = 0.035
+    detection_3d_text_show_label: bool = False
+    detection_3d_text_show_confidence: bool = False
+    detection_3d_text_show_distance: bool = True
     map_frame_id: str = "map"
 
     def __post_init__(self) -> None:
@@ -172,6 +195,10 @@ ENV_OVERRIDES = {
     "detection_3d_frame_id": ("DETECTION_3D_FRAME_ID", _env_str),
     "debug_image_topic": ("DEBUG_IMAGE_TOPIC", _env_str),
     "privacy_image_topic": ("PRIVACY_IMAGE_TOPIC", _env_str),
+    "inspection_request_topic": ("INSPECTION_REQUEST_TOPIC", _env_str),
+    "inspection_status_topic": ("INSPECTION_STATUS_TOPIC", _env_str),
+    "inspection_result_topic": ("INSPECTION_RESULT_TOPIC", _env_str),
+    "inspection_privacy_image_topic": ("INSPECTION_PRIVACY_IMAGE_TOPIC", _env_str),
     "map_snapshot_topic": ("MAP_SNAPSHOT_TOPIC", _env_str),
     "artifact_root": ("JETSON_ARTIFACT_ROOT", _env_str),
     "anomaly_classes": ("ANOMALY_CLASSES", _env_list),
@@ -188,6 +215,8 @@ ENV_OVERRIDES = {
     "marker_text_height_m": ("MARKER_TEXT_HEIGHT_M", _env_float),
     "marker_text_z_offset_m": ("MARKER_TEXT_Z_OFFSET_M", _env_float),
     "marker_text_show_count": ("MARKER_TEXT_SHOW_COUNT", _env_bool),
+    "marker_text_compact": ("MARKER_TEXT_COMPACT", _env_bool),
+    "tracked_object_min_separation_m": ("TRACKED_OBJECT_MIN_SEPARATION_M", _env_float),
     "default_anomaly_distance_m": ("DEFAULT_ANOMALY_DISTANCE_M", _env_float),
     "camera_horizontal_fov_deg": ("CAMERA_HORIZONTAL_FOV_DEG", _env_float),
     "camera_yaw_offset_deg": ("CAMERA_YAW_OFFSET_DEG", _env_float),
@@ -240,6 +269,18 @@ ENV_OVERRIDES = {
     "privacy_draw_track_id": ("PRIVACY_DRAW_TRACK_ID", _env_bool),
     "privacy_draw_mask_overlay": ("PRIVACY_DRAW_MASK_OVERLAY", _env_bool),
     "privacy_mask_overlay_alpha": ("PRIVACY_MASK_OVERLAY_ALPHA", _env_float),
+    "inspection_enabled": ("INSPECTION_ENABLED", _env_bool),
+    "inspection_standoff_m": ("INSPECTION_STANDOFF_M", _env_float),
+    "inspection_min_distance_m": ("INSPECTION_MIN_DISTANCE_M", _env_float),
+    "inspection_max_distance_m": ("INSPECTION_MAX_DISTANCE_M", _env_float),
+    "inspection_max_uncertainty_m": ("INSPECTION_MAX_UNCERTAINTY_M", _env_float),
+    "inspection_require_metric_distance": ("INSPECTION_REQUIRE_METRIC_DISTANCE", _env_bool),
+    "inspection_capture_frames": ("INSPECTION_CAPTURE_FRAMES", _env_int),
+    "inspection_capture_timeout_s": ("INSPECTION_CAPTURE_TIMEOUT_S", _env_float),
+    "inspection_request_timeout_s": ("INSPECTION_REQUEST_TIMEOUT_S", _env_float),
+    "inspection_jpeg_quality": ("INSPECTION_JPEG_QUALITY", _env_int),
+    "inspection_once_per_cluster": ("INSPECTION_ONCE_PER_CLUSTER", _env_bool),
+    "inspection_retry_cooldown_s": ("INSPECTION_RETRY_COOLDOWN_S", _env_float),
     "marker_ray_enabled": ("MARKER_RAY_ENABLED", _env_bool),
     "marker_ray_ttl_s": ("MARKER_RAY_TTL_S", _env_float),
     "marker_uncertainty_enabled": ("MARKER_UNCERTAINTY_ENABLED", _env_bool),
@@ -257,6 +298,11 @@ ENV_OVERRIDES = {
     "detection_3d_sample_stride": ("DETECTION_3D_SAMPLE_STRIDE", _env_int),
     "detection_3d_minimum_thickness_m": ("DETECTION_3D_MINIMUM_THICKNESS_M", _env_float),
     "detection_3d_line_width_m": ("DETECTION_3D_LINE_WIDTH_M", _env_float),
+    "detection_3d_text_enabled": ("DETECTION_3D_TEXT_ENABLED", _env_bool),
+    "detection_3d_text_height_m": ("DETECTION_3D_TEXT_HEIGHT_M", _env_float),
+    "detection_3d_text_show_label": ("DETECTION_3D_TEXT_SHOW_LABEL", _env_bool),
+    "detection_3d_text_show_confidence": ("DETECTION_3D_TEXT_SHOW_CONFIDENCE", _env_bool),
+    "detection_3d_text_show_distance": ("DETECTION_3D_TEXT_SHOW_DISTANCE", _env_bool),
     "map_frame_id": ("MAP_FRAME_ID", _env_str),
 }
 
@@ -305,6 +351,36 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["privacy_mask_overlay_alpha"] = max(
         0.0, min(1.0, float(normalized.get("privacy_mask_overlay_alpha", 0.25)))
     )
+    normalized["inspection_standoff_m"] = max(
+        0.30, float(normalized.get("inspection_standoff_m", 0.70))
+    )
+    normalized["inspection_min_distance_m"] = max(
+        0.10,
+        float(normalized.get("inspection_min_distance_m", 0.40)),
+    )
+    normalized["inspection_max_distance_m"] = max(
+        normalized["inspection_min_distance_m"],
+        float(normalized.get("inspection_max_distance_m", 3.0)),
+    )
+    normalized["inspection_max_uncertainty_m"] = max(
+        0.0, float(normalized.get("inspection_max_uncertainty_m", 0.30))
+    )
+    normalized["inspection_capture_frames"] = max(
+        1, int(normalized.get("inspection_capture_frames", 8))
+    )
+    normalized["inspection_capture_timeout_s"] = max(
+        1.0, float(normalized.get("inspection_capture_timeout_s", 8.0))
+    )
+    normalized["inspection_request_timeout_s"] = max(
+        normalized["inspection_capture_timeout_s"],
+        float(normalized.get("inspection_request_timeout_s", 70.0)),
+    )
+    normalized["inspection_jpeg_quality"] = max(
+        1, min(100, int(normalized.get("inspection_jpeg_quality", 95)))
+    )
+    normalized["inspection_retry_cooldown_s"] = max(
+        0.0, float(normalized.get("inspection_retry_cooldown_s", 60.0))
+    )
     normalized["marker_uncertainty_sigma_scale"] = max(
         0.0, float(normalized.get("marker_uncertainty_sigma_scale", 2.0))
     )
@@ -344,6 +420,9 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     )
     normalized["detection_3d_line_width_m"] = max(
         0.002, float(normalized.get("detection_3d_line_width_m", 0.01))
+    )
+    normalized["detection_3d_text_height_m"] = max(
+        0.01, float(normalized.get("detection_3d_text_height_m", 0.035))
     )
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
     normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))
@@ -397,6 +476,9 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["marker_object_size_m"] = max(0.05, float(normalized.get("marker_object_size_m", 0.20)))
     normalized["marker_text_height_m"] = max(0.01, float(normalized.get("marker_text_height_m", 0.08)))
     normalized["marker_text_z_offset_m"] = max(0.0, float(normalized.get("marker_text_z_offset_m", 0.18)))
+    normalized["tracked_object_min_separation_m"] = max(
+        0.01, float(normalized.get("tracked_object_min_separation_m", 0.01))
+    )
     normalized["laser_window_deg"] = max(0.5, float(normalized.get("laser_window_deg", 6.0)))
     normalized["laser_min_distance_m"] = max(0.01, float(normalized.get("laser_min_distance_m", 0.10)))
     normalized["laser_max_distance_m"] = max(

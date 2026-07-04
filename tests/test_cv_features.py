@@ -10,6 +10,7 @@ import numpy as np
 
 from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     JetsonYoloRosbridgeClient,
+    _detection_sharpness,
     _local_day_key,
     blur_except_detections,
 )
@@ -197,6 +198,22 @@ class MarkerVisualizationTest(unittest.TestCase):
         self.assertEqual(len(markers[0]["points"]), 24)
         self.assertIn("#8", markers[1]["text"])
 
+    def test_compact_3d_text_uses_track_and_distance_only(self) -> None:
+        detection = Detection("bottle", 0.91, [1, 2, 3, 4], track_id=8)
+        bounds = BoundingBox3D(0.1, -0.2, 1.5, 0.3, 0.6, 0.1, 120)
+        markers = build_detection_3d_marker_array(
+            [(detection, bounds)],
+            frame_id="camera",
+            stamp=None,
+            ttl_s=0.75,
+            line_width_m=0.01,
+            text_height_m=0.035,
+            text_show_label=False,
+            text_show_confidence=False,
+        )["markers"]
+        self.assertEqual(markers[1]["text"], "#8 · 1.50 m")
+        self.assertEqual(markers[1]["scale"]["z"], 0.035)
+
     def test_marker_array_contains_ray_uncertainty_and_track_id(self) -> None:
         manager = MarkerManager(
             ray_enabled=True,
@@ -262,6 +279,40 @@ class MarkerVisualizationTest(unittest.TestCase):
             )
         )
 
+    def test_different_tracks_keep_separate_map_markers(self) -> None:
+        manager = MarkerManager(
+            association_radius_m=0.40,
+            tracked_object_min_separation_m=0.12,
+            text_compact=True,
+            ray_enabled=False,
+            uncertainty_enabled=False,
+        )
+        manager.add_or_update(
+            "bottle", ObjectPoseMap(1.0, 1.0), 1, 30.0, track_id=10
+        )
+        manager.add_or_update(
+            "bottle", ObjectPoseMap(1.2, 1.0), 1, 30.0, track_id=11
+        )
+        self.assertEqual(len(manager.active), 2)
+        labels = {
+            marker["text"]
+            for marker in manager.build_marker_array()["markers"]
+            if "text" in marker
+        }
+        self.assertEqual(labels, {"#10", "#11"})
+
+
+class InspectionCaptureTest(unittest.TestCase):
+    def test_sharpness_prefers_detailed_bottle_crop(self) -> None:
+        sharp = np.zeros((80, 80, 3), dtype=np.uint8)
+        sharp[20:60:2, 20:60] = 255
+        blurred = np.full((80, 80, 3), 127, dtype=np.uint8)
+        detection = Detection("bottle", 0.9, [20, 20, 60, 60])
+        self.assertGreater(
+            _detection_sharpness(sharp, detection),
+            _detection_sharpness(blurred, detection),
+        )
+
 
 class DailyStateTest(unittest.TestCase):
     def test_loads_only_current_day_for_dedup_but_keeps_global_counter(self) -> None:
@@ -293,12 +344,15 @@ class DailyStateTest(unittest.TestCase):
             client.event_counter = 0
             client.current_daily_key = _local_day_key()
             client.reported_anomalies = []
-            client.config = SimpleNamespace(reported_merge_radius_m=2.0)
+            client.config = SimpleNamespace(
+                reported_merge_radius_m=0.45,
+                tracked_object_min_separation_m=0.12,
+            )
             client._load_reported_anomalies()
 
         self.assertEqual(client.event_counter, 42)
         self.assertEqual(len(client.reported_anomalies), 1)
-        self.assertAlmostEqual(client.reported_anomalies[0][1].x, 4.0)
+        self.assertAlmostEqual(client.reported_anomalies[0].object_pose.x, 4.0)
 
 
 if __name__ == "__main__":

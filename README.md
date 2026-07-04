@@ -44,6 +44,9 @@ Jetson publishes back through rosbridge:
 - `/anomaly/debug_image/compressed` (`sensor_msgs/CompressedImage`)
 - `/anomaly/privacy_image/compressed` (`sensor_msgs/CompressedImage`, blurred
   except for detected anomaly masks or bounding-box fallback)
+- `/anomaly/inspection/status` (`std_msgs/String`, inspection state machine)
+- `/anomaly/inspection/privacy_image/compressed` (`sensor_msgs/CompressedImage`,
+  best close-up privacy frame)
 - `/anomaly/map_snapshot/compressed` (`sensor_msgs/CompressedImage`)
 
 Default anomaly class is only `bottle`. YOLO can detect other objects, but they
@@ -445,6 +448,8 @@ Useful panels/topics:
 - `/anomaly/events`
 - `/anomaly/debug_image/compressed`
 - `/anomaly/privacy_image/compressed`
+- `/anomaly/inspection/status`
+- `/anomaly/inspection/privacy_image/compressed`
 - `/anomaly/map_snapshot/compressed`
 
 Markers are republished at 1 Hz and expire after `MARKER_TTL_S`, default 180
