@@ -1,5 +1,9 @@
 # Jetson YOLO Rosbridge Anomaly Client
 
+Detaljne upute za ByteTrack/BoT-SORT, instance segmentaciju, privacy maske i
+Foxglove zraku/krug nesigurnosti nalaze se u
+[`COMPUTER_VISION_FEATURES.md`](COMPUTER_VISION_FEATURES.md).
+
 Jetson Orin runs the complete YOLO anomaly detection and evidence generation
 pipeline as a plain Python WebSocket client. It never joins the Raspberry Pi
 ROS 2 DDS graph. It connects to the Raspberry Pi through `rosbridge_server`
@@ -21,6 +25,10 @@ WebSocket and publishes only the small visualization topics needed by Foxglove.
 Jetson subscribes through rosbridge:
 
 - `/camera/color/image/compressed` (`sensor_msgs/CompressedImage`)
+- `/camera/realsense/color/camera_info` (`sensor_msgs/CameraInfo`) when camera
+  intrinsics are enabled
+- `/camera/realsense/aligned_depth_to_color/image_raw` (`sensor_msgs/Image`)
+  when depth distance is enabled
 - `/map` (`nav_msgs/OccupancyGrid`)
 - `/robot_pose_map` (`geometry_msgs/PoseStamped`) or `/amcl_pose`
   (`geometry_msgs/PoseWithCovarianceStamped`) when configured
@@ -32,6 +40,8 @@ Jetson publishes back through rosbridge:
 - `/anomaly/events/readable` (`std_msgs/String`, human-readable summary)
 - `/anomaly/markers` (`visualization_msgs/MarkerArray`, frame `map`)
 - `/anomaly/debug_image/compressed` (`sensor_msgs/CompressedImage`)
+- `/anomaly/privacy_image/compressed` (`sensor_msgs/CompressedImage`, blurred
+  except for detected anomaly masks or bounding-box fallback)
 - `/anomaly/map_snapshot/compressed` (`sensor_msgs/CompressedImage`)
 
 Default anomaly class is only `bottle`. YOLO can detect other objects, but they
@@ -52,10 +62,14 @@ the robot stack's `config/containers/*.env` layout. Important defaults:
 ROSBRIDGE_URL=ws://raspberry.local:9090
 CAMERA_TOPIC=/camera/color/image/compressed
 DEPTH_TOPIC=/camera/realsense/aligned_depth_to_color/image_raw
+CAMERA_INFO_TOPIC=/camera/realsense/color/camera_info
 MAP_TOPIC=/map
 ROBOT_POSE_TOPIC=/robot_pose_map
 SCAN_TOPIC=/scan
 USE_DEPTH_DISTANCE=1
+USE_CAMERA_INTRINSICS=1
+DEPTH_SYNC_TOLERANCE_S=0.25
+DEPTH_BUFFER_SIZE=8
 DEPTH_ROI_SCALE=0.60
 DEPTH_MIN_VALID_PIXELS=20
 USE_LASER_DISTANCE=1
@@ -73,12 +87,34 @@ DAILY_MAP_SUMMARY=1
 DEBUG_IMAGE_ALWAYS_STREAM=1
 DEBUG_IMAGE_ON_DETECTION=1
 DEBUG_IMAGE_PUBLISH_HZ=2
+PRIVACY_IMAGE_ENABLED=1
+PRIVACY_IMAGE_TOPIC=/anomaly/privacy_image/compressed
+PRIVACY_IMAGE_PUBLISH_HZ=2
+PRIVACY_BLUR_KERNEL_SIZE=51
+PRIVACY_BBOX_PADDING_RATIO=0.03
+PRIVACY_USE_SEGMENTATION_MASKS=1
+PRIVACY_DRAW_TRACK_ID=1
+PRIVACY_DRAW_MASK_OVERLAY=1
+MARKER_RAY_ENABLED=1
+MARKER_UNCERTAINTY_ENABLED=1
 MARKER_TTL_S=180
 MARKER_REPUBLISH_HZ=1
 DEFAULT_ANOMALY_DISTANCE_M=1.5
 CAMERA_HORIZONTAL_FOV_DEG=69
 CAMERA_YAW_OFFSET_DEG=0
-YOLO_MODEL_PATH=yolov8n.pt
+YOLO_MODEL_PATH=yolov8n-seg.pt
+YOLO_IMAGE_SIZE=640
+YOLO_IOU_THRESHOLD=0.70
+YOLO_MAX_DETECTIONS=20
+YOLO_DEVICE=0
+YOLO_HALF=1
+YOLO_AUGMENT=0
+YOLO_AGNOSTIC_NMS=0
+YOLO_FILTER_CLASSES=1
+TRACKING_ENABLED=1
+TRACKING_BACKEND=bytetrack.yaml
+TRACKING_CONFIDENCE_THRESHOLD=0.25
+SEGMENTATION_ENABLED=1
 JETSON_ARTIFACT_ROOT=/home/jetson/anomaly_logs
 JETSON_LOG_DIR=/workspace/logs
 ```
@@ -87,13 +123,42 @@ The structured YAML defaults live in `config/anomaly_rosbridge.yaml`.
 Environment variables from `config/containers/jetson_anomaly.env` override the
 YAML values.
 
-When RealSense aligned depth is available, Jetson estimates object distance
-from valid depth pixels inside the central part of the detected bounding box.
+When RealSense camera info and aligned depth are available, Jetson uses the
+camera intrinsic matrix to calculate the horizontal ray and depth to calculate
+distance along that ray. Both features can be independently enabled with
+`USE_CAMERA_INTRINSICS` and `USE_DEPTH_DISTANCE`. If camera info has not arrived,
+the configured horizontal field of view remains the bearing fallback.
+
+Depth frames are buffered and matched to the RGB acquisition timestamp within
+`DEPTH_SYNC_TOLERANCE_S`; stale or mismatched frames are rejected. Jetson
+estimates distance from valid depth pixels inside the central part of the
+detected bounding box.
 This keeps a table leg or other obstacle in front of the object from being
 mistaken for the bottle distance. If depth is unavailable or too sparse, Jetson
 falls back to the laser range around the detected bounding-box bearing. If no
 valid scan range is available either, it falls back to
 `DEFAULT_ANOMALY_DISTANCE_M`.
+
+The event JSON includes `localization.distance_source`,
+`localization.bearing_source`, robust depth uncertainty, valid depth sample
+count, and the RGB/depth timestamp delta.
+
+The optional privacy stream blurs the complete image and restores segmentation
+masks for detections listed in `ANOMALY_CLASSES`. If no mask is available it
+falls back to the bounding box; if there is no detection, the whole frame
+remains blurred.
+
+### YOLO inference tuning
+
+Inference controls are exposed through configuration. The shipped profile is a
+low-latency Jetson starting point: 640 px input, FP16 on GPU, class filtering,
+and no test-time augmentation. For small or distant bottles, test
+`YOLO_IMAGE_SIZE=960`; it usually improves recall but costs latency. If false
+negatives dominate, test `CONFIDENCE_THRESHOLD=0.35` while keeping
+`ANOMALY_MIN_OBSERVATIONS=2` or `3`. Enable `YOLO_AUGMENT=1` only for an
+accuracy-focused benchmark because test-time augmentation is substantially
+slower. Evaluate each profile on recorded bags and choose thresholds from
+precision/recall, not from a single live scene.
 
 Detections with the same label within `CLUSTER_MERGE_RADIUS_M` are merged into
 one map square and marker text shows the observed count, for example
@@ -179,9 +244,9 @@ INSTALL_ULTRALYTICS=false docker compose \
   build jetson_anomaly
 ```
 
-For real inference, `MOCK_MODE` must stay `0` and `YOLO_MODEL_PATH` should point
-to `yolov8n.pt` or another compatible model. `MOCK_MODE=1` is only a fallback
-for rosbridge and visualization debugging.
+For real inference, `MOCK_MODE` must stay `0`. Use `yolov8n-seg.pt` for masks
+or `yolov8n.pt` for bounding-box-only operation. `MOCK_MODE=1` is only a
+fallback for rosbridge and visualization debugging.
 
 ## Run
 
@@ -275,11 +340,22 @@ Example `/anomaly/events` payload:
   "label": "bottle",
   "type": "semantic_object_anomaly",
   "confidence": 0.87,
+  "track_id": 7,
+  "segmentation_mask_used": true,
   "status": "active",
   "ttl_sec": 180,
   "bbox_xyxy": [312, 210, 390, 420],
   "robot_pose_map": {"x": 1.52, "y": -0.48, "yaw": 1.31},
   "object_pose_map": {"x": 2.10, "y": -0.92, "z": 0.0},
+  "localization": {
+    "distance_m": 0.82,
+    "distance_source": "depth",
+    "distance_uncertainty_m": 0.03,
+    "distance_valid_samples": 642,
+    "depth_axial_m": 0.80,
+    "rgb_depth_delta_s": 0.018,
+    "bearing_source": "camera_intrinsics"
+  },
   "cluster": {"id": "cluster_00003", "count": 2, "merge_radius_m": 0.2},
   "jetson_files": {
     "original_image": "/home/jetson/anomaly_logs/images/original/anom_00042_bottle.jpg",
@@ -359,6 +435,7 @@ Useful panels/topics:
 - `/anomaly/markers`
 - `/anomaly/events`
 - `/anomaly/debug_image/compressed`
+- `/anomaly/privacy_image/compressed`
 - `/anomaly/map_snapshot/compressed`
 
 Markers are republished at 1 Hz and expire after `MARKER_TTL_S`, default 180
@@ -381,7 +458,8 @@ seconds. Expired markers are deleted through `visualization_msgs/Marker.DELETE`.
 13. Confirm `/anomaly/events` publishes JSON.
 14. Confirm `/anomaly/markers` publishes in `map` frame.
 15. Confirm `/anomaly/debug_image/compressed` publishes.
-16. Confirm `/anomaly/map_snapshot/compressed` publishes.
-17. Confirm Foxglove shows `ANOMALY: bottle` on the map.
-18. Confirm the marker remains visible for 180 seconds and then disappears.
-19. Confirm existing robot navigation still works.
+16. Confirm `/anomaly/privacy_image/compressed` is blurred outside detected bottles.
+17. Confirm `/anomaly/map_snapshot/compressed` publishes.
+18. Confirm Foxglove shows `ANOMALY: bottle` on the map.
+19. Confirm the marker remains visible for 180 seconds and then disappears.
+20. Confirm existing robot navigation still works.

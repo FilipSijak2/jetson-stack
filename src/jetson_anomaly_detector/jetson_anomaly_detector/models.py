@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import numpy as np
 
@@ -11,6 +11,28 @@ class Detection:
     label: str
     confidence: float
     bbox_xyxy: List[int]
+    track_id: Optional[int] = None
+    mask: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class CameraIntrinsics:
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class DistanceEstimate:
+    distance_m: float
+    source: str
+    uncertainty_m: Optional[float] = None
+    valid_sample_count: int = 0
+    age_s: Optional[float] = None
+    axial_depth_m: Optional[float] = None
 
 
 @dataclass(frozen=True)

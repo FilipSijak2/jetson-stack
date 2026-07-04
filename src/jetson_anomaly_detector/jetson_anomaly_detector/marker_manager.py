@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .models import AnomalyClusterSummary, ObjectPoseMap
+from .models import AnomalyClusterSummary, ObjectPoseMap, RobotPoseMap
 from .ros_messages import ros_time_now
 
 
@@ -13,6 +13,7 @@ MARKER_ADD = 0
 MARKER_DELETE = 2
 MARKER_DELETE_ALL = 3
 MARKER_CUBE = 1
+MARKER_LINE_STRIP = 4
 MARKER_TEXT_VIEW_FACING = 9
 TEXT_MARKER_HEIGHT_M = 0.08
 TEXT_MARKER_Z_OFFSET_M = 0.18
@@ -28,6 +29,9 @@ class ActiveCluster:
     count: int
     expires_at: float
     ttl_s: float
+    robot_pose: Optional[RobotPoseMap] = None
+    uncertainty_m: Optional[float] = None
+    track_id: Optional[int] = None
 
 
 class MarkerManager:
@@ -40,6 +44,12 @@ class MarkerManager:
         text_height_m: float = TEXT_MARKER_HEIGHT_M,
         text_z_offset_m: float = TEXT_MARKER_Z_OFFSET_M,
         text_show_count: bool = False,
+        ray_enabled: bool = True,
+        uncertainty_enabled: bool = True,
+        uncertainty_sigma_scale: float = 2.0,
+        uncertainty_min_radius_m: float = 0.05,
+        uncertainty_max_radius_m: float = 1.0,
+        auxiliary_line_width_m: float = 0.025,
     ) -> None:
         self.frame_id = frame_id
         self.merge_radius_m = max(0.01, float(merge_radius_m))
@@ -51,9 +61,18 @@ class MarkerManager:
         self.text_height_m = max(0.01, float(text_height_m))
         self.text_z_offset_m = max(0.0, float(text_z_offset_m))
         self.text_show_count = bool(text_show_count)
+        self.ray_enabled = bool(ray_enabled)
+        self.uncertainty_enabled = bool(uncertainty_enabled)
+        self.uncertainty_sigma_scale = max(0.0, float(uncertainty_sigma_scale))
+        self.uncertainty_min_radius_m = max(0.0, float(uncertainty_min_radius_m))
+        self.uncertainty_max_radius_m = max(
+            self.uncertainty_min_radius_m, float(uncertainty_max_radius_m)
+        )
+        self.auxiliary_line_width_m = max(0.005, float(auxiliary_line_width_m))
         self.active: Dict[str, ActiveCluster] = {}
         self.delete_queue: List[int] = []
-        self.next_marker_base_id = 2
+        self.marker_stride = 4
+        self.next_marker_base_id = self.marker_stride
         self.next_cluster_index = 1
 
     def add_or_update(
@@ -62,6 +81,9 @@ class MarkerManager:
         object_pose: ObjectPoseMap,
         observed_count: int,
         ttl_s: float,
+        robot_pose: Optional[RobotPoseMap] = None,
+        uncertainty_m: Optional[float] = None,
+        track_id: Optional[int] = None,
     ) -> AnomalyClusterSummary:
         cluster = self._nearest_cluster(label, object_pose)
         if cluster is None:
@@ -73,15 +95,23 @@ class MarkerManager:
                 count=max(1, observed_count),
                 expires_at=time.monotonic() + ttl_s,
                 ttl_s=ttl_s,
+                robot_pose=robot_pose,
+                uncertainty_m=uncertainty_m,
+                track_id=track_id,
             )
             self.next_cluster_index += 1
-            self.next_marker_base_id += 2
+            self.next_marker_base_id += self.marker_stride
             self.active[cluster.cluster_id] = cluster
         else:
             cluster.object_pose = self._blend_pose(cluster.object_pose, object_pose, new_weight=0.20)
             cluster.count += max(1, observed_count)
             cluster.expires_at = time.monotonic() + ttl_s
             cluster.ttl_s = ttl_s
+            cluster.robot_pose = robot_pose or cluster.robot_pose
+            cluster.uncertainty_m = (
+                uncertainty_m if uncertainty_m is not None else cluster.uncertainty_m
+            )
+            cluster.track_id = track_id if track_id is not None else cluster.track_id
 
         cluster = self._merge_overlapping_clusters(cluster)
         return self._summary(cluster)
@@ -93,6 +123,10 @@ class MarkerManager:
         for cluster in self.active.values():
             markers.append(self._object_marker(cluster, stamp))
             markers.append(self._text_marker(cluster, stamp))
+            if self.ray_enabled and cluster.robot_pose is not None:
+                markers.append(self._ray_marker(cluster, stamp))
+            if self.uncertainty_enabled and cluster.uncertainty_m is not None:
+                markers.append(self._uncertainty_marker(cluster, stamp))
         while self.delete_queue:
             marker_id = self.delete_queue.pop(0)
             markers.append(self._delete_marker(marker_id, stamp))
@@ -135,7 +169,10 @@ class MarkerManager:
                 target.expires_at = max(target.expires_at, candidate.expires_at)
                 target.ttl_s = max(target.ttl_s, candidate.ttl_s)
                 self.active.pop(cluster_id, None)
-                self.delete_queue.extend([candidate.marker_base_id, candidate.marker_base_id + 1])
+                self.delete_queue.extend(
+                    candidate.marker_base_id + offset
+                    for offset in range(self.marker_stride)
+                )
                 merged = True
                 break
         return target
@@ -145,7 +182,10 @@ class MarkerManager:
         expired = [cluster_id for cluster_id, cluster in self.active.items() if cluster.expires_at <= now]
         for cluster_id in expired:
             cluster = self.active.pop(cluster_id)
-            self.delete_queue.extend([cluster.marker_base_id, cluster.marker_base_id + 1])
+            self.delete_queue.extend(
+                cluster.marker_base_id + offset
+                for offset in range(self.marker_stride)
+            )
 
     def _base(self, cluster: ActiveCluster, marker_id: int, marker_type: int, stamp: Dict[str, int]) -> Dict[str, Any]:
         return {
@@ -183,6 +223,56 @@ class MarkerManager:
                 "scale": {"x": 0.0, "y": 0.0, "z": self.text_height_m},
                 "color": {"r": 1.0, "g": 0.1, "b": 0.0, "a": 1.0},
                 "text": self._label_text(cluster),
+            }
+        )
+        return msg
+
+    def _ray_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
+        msg = self._base(cluster, cluster.marker_base_id + 2, MARKER_LINE_STRIP, stamp)
+        msg["pose"]["position"] = {"x": 0.0, "y": 0.0, "z": 0.0}
+        robot_pose = cluster.robot_pose
+        assert robot_pose is not None
+        msg.update(
+            {
+                "scale": {"x": self.auxiliary_line_width_m, "y": 0.0, "z": 0.0},
+                "color": {"r": 1.0, "g": 0.65, "b": 0.0, "a": 0.85},
+                "points": [
+                    {"x": robot_pose.x, "y": robot_pose.y, "z": 0.04},
+                    {
+                        "x": cluster.object_pose.x,
+                        "y": cluster.object_pose.y,
+                        "z": cluster.object_pose.z + 0.04,
+                    },
+                ],
+            }
+        )
+        return msg
+
+    def _uncertainty_marker(
+        self, cluster: ActiveCluster, stamp: Dict[str, int]
+    ) -> Dict[str, Any]:
+        msg = self._base(cluster, cluster.marker_base_id + 3, MARKER_LINE_STRIP, stamp)
+        msg["pose"]["position"] = {"x": 0.0, "y": 0.0, "z": 0.0}
+        uncertainty = max(0.0, float(cluster.uncertainty_m or 0.0))
+        radius = min(
+            self.uncertainty_max_radius_m,
+            max(self.uncertainty_min_radius_m, uncertainty * self.uncertainty_sigma_scale),
+        )
+        points = []
+        for index in range(49):
+            angle = 2.0 * math.pi * index / 48.0
+            points.append(
+                {
+                    "x": cluster.object_pose.x + radius * math.cos(angle),
+                    "y": cluster.object_pose.y + radius * math.sin(angle),
+                    "z": cluster.object_pose.z + 0.025,
+                }
+            )
+        msg.update(
+            {
+                "scale": {"x": self.auxiliary_line_width_m, "y": 0.0, "z": 0.0},
+                "color": {"r": 1.0, "g": 0.85, "b": 0.0, "a": 0.9},
+                "points": points,
             }
         )
         return msg
@@ -226,6 +316,9 @@ class MarkerManager:
         )
 
     def _label_text(self, cluster: ActiveCluster) -> str:
-        if not self.text_show_count or cluster.count <= 1:
-            return cluster.label
-        return f"{cluster.label} x{cluster.count}"
+        label = cluster.label
+        if cluster.track_id is not None:
+            label += f" #{cluster.track_id}"
+        if self.text_show_count and cluster.count > 1:
+            label += f" x{cluster.count}"
+        return label

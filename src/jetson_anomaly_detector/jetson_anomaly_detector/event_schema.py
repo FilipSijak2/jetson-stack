@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .models import Detection, ObjectPoseMap, RobotPoseMap
+from .models import Detection, DistanceEstimate, ObjectPoseMap, RobotPoseMap
 from .ros_messages import iso_timestamp
 
 
@@ -24,6 +24,8 @@ def build_event(
     cluster_id: str,
     cluster_count: int,
     cluster_merge_radius_m: float,
+    distance_estimate: DistanceEstimate,
+    bearing_source: str,
     ttl_sec: float,
     original_image: Optional[Path],
     annotated_image: Optional[Path],
@@ -37,11 +39,34 @@ def build_event(
         "label": detection.label,
         "type": "semantic_object_anomaly",
         "confidence": round(float(detection.confidence), 4),
+        "track_id": detection.track_id,
+        "segmentation_mask_used": detection.mask is not None,
         "status": "active",
         "ttl_sec": int(ttl_sec),
         "bbox_xyxy": [int(value) for value in detection.bbox_xyxy],
         "robot_pose_map": pose_to_dict(robot_pose),
         "object_pose_map": object_pose_to_dict(object_pose),
+        "localization": {
+            "distance_m": round(float(distance_estimate.distance_m), 4),
+            "distance_source": distance_estimate.source,
+            "distance_uncertainty_m": (
+                round(float(distance_estimate.uncertainty_m), 4)
+                if distance_estimate.uncertainty_m is not None
+                else None
+            ),
+            "distance_valid_samples": int(distance_estimate.valid_sample_count),
+            "depth_axial_m": (
+                round(float(distance_estimate.axial_depth_m), 4)
+                if distance_estimate.axial_depth_m is not None
+                else None
+            ),
+            "rgb_depth_delta_s": (
+                round(float(distance_estimate.age_s), 4)
+                if distance_estimate.age_s is not None
+                else None
+            ),
+            "bearing_source": bearing_source,
+        },
         "cluster": {
             "id": cluster_id,
             "count": int(cluster_count),
@@ -63,11 +88,13 @@ def build_readable_event(event: Dict[str, Any]) -> str:
     cluster = event.get("cluster") or {}
     files = event.get("jetson_files") or {}
     bbox = event.get("bbox_xyxy") or []
+    localization = event.get("localization") or {}
 
     lines = [
         f"Anomaly {event.get('id', '-')}",
         f"time: {event.get('timestamp', '-')}",
         f"label: {event.get('label', '-')}  confidence: {float(event.get('confidence', 0.0)):.2f}",
+        f"track_id: {event.get('track_id') if event.get('track_id') is not None else '-'}",
         f"cluster: {cluster.get('id', '-')}  count: {cluster.get('count', 1)}  radius_m: {cluster.get('merge_radius_m', '-')}",
         (
             "object_map: "
@@ -82,6 +109,13 @@ def build_readable_event(event: Dict[str, Any]) -> str:
             f"yaw={float(robot_pose.get('yaw', 0.0)):.2f}"
         ),
         f"bbox_xyxy: {bbox}",
+        (
+            "localization: "
+            f"distance={float(localization.get('distance_m', 0.0)):.2f} m "
+            f"source={localization.get('distance_source', '-')} "
+            f"uncertainty={localization.get('distance_uncertainty_m', '-')} m "
+            f"bearing={localization.get('bearing_source', '-')}"
+        ),
         f"daily_map: {files.get('daily_map_summary') or files.get('map_snapshot') or '-'}",
         f"event_log: {files.get('event_log', '-')}",
     ]

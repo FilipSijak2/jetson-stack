@@ -6,6 +6,7 @@ import logging
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,15 +17,26 @@ import numpy as np
 
 from .config import AppConfig, load_config
 from .event_schema import EventJsonlWriter, build_event, build_readable_event
-from .localization import estimate_depth_distance_m, estimate_laser_distance_m, estimate_object_pose_map
+from .localization import estimate_depth_measurement, estimate_laser_distance_m, estimate_object_pose_map
 from .map_snapshot import save_daily_map_summary
 from .marker_manager import MarkerManager
-from .models import AnomalyClusterSummary, Detection, LaserScan, ObjectPoseMap, OccupancyGridMap, RobotPoseMap
+from .models import (
+    AnomalyClusterSummary,
+    CameraIntrinsics,
+    Detection,
+    DistanceEstimate,
+    LaserScan,
+    ObjectPoseMap,
+    OccupancyGridMap,
+    RobotPoseMap,
+)
 from .ros_messages import (
     compressed_image_msg,
     decode_compressed_image,
     decode_depth_image,
     encode_image,
+    header_stamp_seconds,
+    parse_camera_info,
     parse_occupancy_grid,
     parse_laser_scan,
     parse_robot_pose,
@@ -40,6 +52,8 @@ LOGGER = logging.getLogger("jetson_yolo_rosbridge_client")
 class LocatedDetection:
     detection: Detection
     object_pose: ObjectPoseMap
+    distance_estimate: DistanceEstimate
+    bearing_source: str
 
 
 @dataclass(frozen=True)
@@ -47,6 +61,8 @@ class DetectionGroup:
     label: str
     detections: List[Detection]
     object_pose: ObjectPoseMap
+    distance_estimate: DistanceEstimate
+    bearing_source: str
 
 
 @dataclass
@@ -55,6 +71,7 @@ class PendingAnomaly:
     object_pose: ObjectPoseMap
     observations: int
     last_seen: float
+    track_id: Optional[int] = None
 
 
 class JetsonYoloRosbridgeClient:
@@ -79,6 +96,18 @@ class JetsonYoloRosbridgeClient:
             anomaly_classes=config.anomaly_classes,
             mock_mode=config.mock_mode,
             logger=LOGGER,
+            image_size=config.yolo_image_size,
+            iou_threshold=config.yolo_iou_threshold,
+            max_detections=config.yolo_max_detections,
+            device=config.yolo_device,
+            half=config.yolo_half,
+            augment=config.yolo_augment,
+            agnostic_nms=config.yolo_agnostic_nms,
+            filter_classes=config.yolo_filter_classes,
+            tracking_enabled=config.tracking_enabled,
+            tracking_backend=config.tracking_backend,
+            tracking_confidence_threshold=config.tracking_confidence_threshold,
+            segmentation_enabled=config.segmentation_enabled,
         )
         self.markers = MarkerManager(
             frame_id=config.map_frame_id,
@@ -88,13 +117,19 @@ class JetsonYoloRosbridgeClient:
             text_height_m=config.marker_text_height_m,
             text_z_offset_m=config.marker_text_z_offset_m,
             text_show_count=config.marker_text_show_count,
+            ray_enabled=config.marker_ray_enabled,
+            uncertainty_enabled=config.marker_uncertainty_enabled,
+            uncertainty_sigma_scale=config.marker_uncertainty_sigma_scale,
+            uncertainty_min_radius_m=config.marker_uncertainty_min_radius_m,
+            uncertainty_max_radius_m=config.marker_uncertainty_max_radius_m,
+            auxiliary_line_width_m=config.marker_aux_line_width_m,
         )
         self.rosbridge = RosbridgeClient(config.rosbridge_url, LOGGER)
         self.latest_map: Optional[OccupancyGridMap] = None
         self.latest_pose: Optional[RobotPoseMap] = None
         self.latest_scan: Optional[LaserScan] = None
-        self.latest_depth: Optional[np.ndarray] = None
-        self.latest_depth_received_at = 0.0
+        self.camera_intrinsics: Optional[CameraIntrinsics] = None
+        self.depth_buffer = deque(maxlen=config.depth_buffer_size)
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
         self.reported_anomalies: List[tuple[str, ObjectPoseMap]] = []
@@ -107,6 +142,7 @@ class JetsonYoloRosbridgeClient:
         self.next_marker_publish = 0.0
         self.next_daily_summary_refresh = 0.0
         self.next_debug_image_publish = 0.0
+        self.next_privacy_image_publish = 0.0
         self.last_missing_pose_log = 0.0
         self.last_missing_map_log = 0.0
         self.last_missing_scan_log = 0.0
@@ -142,6 +178,13 @@ class JetsonYoloRosbridgeClient:
                 queue_length=1,
                 throttle_rate=self.config.depth_throttle_ms,
             )
+        if self.config.use_camera_intrinsics and self.config.camera_info_topic:
+            self.rosbridge.subscribe(
+                self.config.camera_info_topic,
+                "sensor_msgs/CameraInfo",
+                queue_length=1,
+                throttle_rate=1000,
+            )
         if self.config.use_laser_distance and self.config.scan_topic:
             self.rosbridge.subscribe(self.config.scan_topic, "sensor_msgs/LaserScan", queue_length=1, throttle_rate=100)
         pose_type = "geometry_msgs/PoseStamped"
@@ -153,25 +196,38 @@ class JetsonYoloRosbridgeClient:
         self.rosbridge.advertise(self.config.readable_event_topic, "std_msgs/String")
         self.rosbridge.advertise(self.config.marker_topic, "visualization_msgs/MarkerArray")
         self.rosbridge.advertise(self.config.debug_image_topic, "sensor_msgs/CompressedImage")
+        if self.config.privacy_image_enabled:
+            self.rosbridge.advertise(
+                self.config.privacy_image_topic, "sensor_msgs/CompressedImage"
+            )
         self.rosbridge.advertise(self.config.map_snapshot_topic, "sensor_msgs/CompressedImage")
         self._clear_existing_markers()
 
         LOGGER.info(
-            "Subscribed camera=%s depth=%s map=%s pose=%s scan=%s depth_distance=%s laser_distance=%s",
+            "Subscribed camera=%s camera_info=%s depth=%s map=%s pose=%s scan=%s "
+            "intrinsics=%s depth_distance=%s laser_distance=%s",
             self.config.camera_topic,
+            self.config.camera_info_topic if self.config.use_camera_intrinsics else "disabled",
             self.config.depth_topic if self.config.use_depth_distance else "disabled",
             self.config.map_topic,
             self.config.robot_pose_topic,
             self.config.scan_topic if self.config.use_laser_distance else "disabled",
+            self.config.use_camera_intrinsics,
             self.config.use_depth_distance,
             self.config.use_laser_distance,
         )
         LOGGER.info(
-            "Publishing events=%s readable_events=%s markers=%s debug_image=%s map_snapshot=%s",
+            "Publishing events=%s readable_events=%s markers=%s debug_image=%s "
+            "privacy_image=%s map_snapshot=%s",
             self.config.event_topic,
             self.config.readable_event_topic,
             self.config.marker_topic,
             self.config.debug_image_topic,
+            (
+                self.config.privacy_image_topic
+                if self.config.privacy_image_enabled
+                else "disabled"
+            ),
             self.config.map_snapshot_topic,
         )
 
@@ -196,6 +252,8 @@ class JetsonYoloRosbridgeClient:
             self._on_camera_image(msg)
         elif topic == self.config.depth_topic:
             self._on_depth_image(msg)
+        elif topic == self.config.camera_info_topic:
+            self._on_camera_info(msg)
         elif topic == self.config.map_topic:
             self._on_map(msg)
         elif topic == self.config.robot_pose_topic:
@@ -223,10 +281,28 @@ class JetsonYoloRosbridgeClient:
 
     def _on_depth_image(self, msg: Dict[str, Any]) -> None:
         try:
-            self.latest_depth = decode_depth_image(msg)
-            self.latest_depth_received_at = time.monotonic()
+            depth = decode_depth_image(msg)
+            self.depth_buffer.append((header_stamp_seconds(msg), time.monotonic(), depth))
         except Exception as exc:
             LOGGER.warning("Failed to decode depth image: %s", exc)
+
+    def _on_camera_info(self, msg: Dict[str, Any]) -> None:
+        try:
+            intrinsics = parse_camera_info(msg)
+        except Exception as exc:
+            LOGGER.warning("Failed to parse CameraInfo: %s", exc)
+            return
+        if intrinsics != self.camera_intrinsics:
+            self.camera_intrinsics = intrinsics
+            LOGGER.info(
+                "Camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f size=%dx%d",
+                intrinsics.fx,
+                intrinsics.fy,
+                intrinsics.cx,
+                intrinsics.cy,
+                intrinsics.width,
+                intrinsics.height,
+            )
 
     def _on_camera_image(self, msg: Dict[str, Any]) -> None:
         self.frame_count += 1
@@ -242,6 +318,7 @@ class JetsonYoloRosbridgeClient:
         detections = self.detector.detect(frame)
         anomalies = self._filter_anomalies(detections)
         self._publish_debug_stream_if_due(anomalies, frame, msg)
+        self._publish_privacy_stream_if_due(anomalies, frame, msg)
         if not anomalies:
             return
 
@@ -249,7 +326,10 @@ class JetsonYoloRosbridgeClient:
             self._log_missing_pose()
             return
 
-        located = [self._locate_detection(detection, frame.shape[1], frame.shape[0]) for detection in anomalies]
+        located = [
+            self._locate_detection(detection, frame.shape[1], frame.shape[0], msg)
+            for detection in anomalies
+        ]
         for group in self._group_located_detections(located):
             confirmed_group = self._confirm_detection_group(group)
             if confirmed_group is None:
@@ -259,6 +339,9 @@ class JetsonYoloRosbridgeClient:
                 object_pose=confirmed_group.object_pose,
                 observed_count=len(confirmed_group.detections),
                 ttl_s=self.config.marker_ttl_s,
+                robot_pose=self.latest_pose,
+                uncertainty_m=confirmed_group.distance_estimate.uncertainty_m,
+                track_id=_best_track_id(confirmed_group.detections),
             )
             self.daily_clusters[cluster.cluster_id] = cluster
             if self._already_reported(confirmed_group.label, cluster.object_pose):
@@ -280,10 +363,20 @@ class JetsonYoloRosbridgeClient:
             if detection.label in anomaly_labels and detection.confidence >= self.config.confidence_threshold
         ]
 
-    def _locate_detection(self, detection: Detection, image_width: int, image_height: int) -> LocatedDetection:
+    def _locate_detection(
+        self,
+        detection: Detection,
+        image_width: int,
+        image_height: int,
+        source_msg: Dict[str, Any],
+    ) -> LocatedDetection:
         robot_pose = self.latest_pose
         if robot_pose is None:
             raise RuntimeError("Cannot locate detection without robot pose")
+        distance_estimate = self._distance_for_detection(
+            detection, image_width, image_height, source_msg
+        )
+        intrinsics = self.camera_intrinsics if self.config.use_camera_intrinsics else None
         object_pose = estimate_object_pose_map(
             robot_pose=robot_pose,
             bbox_xyxy=detection.bbox_xyxy,
@@ -291,9 +384,33 @@ class JetsonYoloRosbridgeClient:
             default_distance_m=self.config.default_anomaly_distance_m,
             camera_horizontal_fov_deg=self.config.camera_horizontal_fov_deg,
             camera_yaw_offset_deg=self.config.camera_yaw_offset_deg,
-            measured_distance_m=self._distance_for_detection(detection, image_width, image_height),
+            measured_distance_m=distance_estimate.distance_m,
+            camera_intrinsics=intrinsics,
+            measured_distance_is_axial=distance_estimate.source == "depth",
         )
-        return LocatedDetection(detection=detection, object_pose=object_pose)
+        if distance_estimate.source == "depth":
+            ray_distance = float(
+                np.hypot(object_pose.x - robot_pose.x, object_pose.y - robot_pose.y)
+            )
+            scale = ray_distance / max(0.001, distance_estimate.distance_m)
+            distance_estimate = DistanceEstimate(
+                distance_m=ray_distance,
+                source=distance_estimate.source,
+                uncertainty_m=(
+                    distance_estimate.uncertainty_m * scale
+                    if distance_estimate.uncertainty_m is not None
+                    else None
+                ),
+                valid_sample_count=distance_estimate.valid_sample_count,
+                age_s=distance_estimate.age_s,
+                axial_depth_m=distance_estimate.distance_m,
+            )
+        return LocatedDetection(
+            detection=detection,
+            object_pose=object_pose,
+            distance_estimate=distance_estimate,
+            bearing_source="camera_intrinsics" if intrinsics is not None else "horizontal_fov",
+        )
 
     def _group_located_detections(self, located: List[LocatedDetection]) -> List[DetectionGroup]:
         groups: List[List[LocatedDetection]] = []
@@ -317,6 +434,8 @@ class JetsonYoloRosbridgeClient:
                 label=group[0].detection.label,
                 detections=[item.detection for item in group],
                 object_pose=self._group_center(group),
+                distance_estimate=group[0].distance_estimate,
+                bearing_source=group[0].bearing_source,
             )
             for group in groups
         ]
@@ -345,18 +464,22 @@ class JetsonYoloRosbridgeClient:
             label=group.label,
             detections=group.detections,
             object_pose=pending.object_pose,
+            distance_estimate=group.distance_estimate,
+            bearing_source=group.bearing_source,
         )
 
     def _remember_pending_anomaly(self, group: DetectionGroup) -> PendingAnomaly:
         now = time.monotonic()
         self._drop_stale_pending_anomalies(now)
-        index = self._pending_index(group.label, group.object_pose)
+        track_id = _best_track_id(group.detections)
+        index = self._pending_index(group.label, group.object_pose, track_id)
         if index is None:
             pending = PendingAnomaly(
                 label=group.label,
                 object_pose=group.object_pose,
                 observations=1,
                 last_seen=now,
+                track_id=track_id,
             )
             self.pending_anomalies.append(pending)
             return pending
@@ -370,6 +493,7 @@ class JetsonYoloRosbridgeClient:
         )
         pending.observations = observations
         pending.last_seen = now
+        pending.track_id = track_id if track_id is not None else pending.track_id
         return pending
 
     def _drop_stale_pending_anomalies(self, now: float) -> None:
@@ -380,7 +504,21 @@ class JetsonYoloRosbridgeClient:
             if now - pending.last_seen <= ttl
         ]
 
-    def _pending_index(self, label: str, object_pose: ObjectPoseMap) -> Optional[int]:
+    def _pending_index(
+        self,
+        label: str,
+        object_pose: ObjectPoseMap,
+        track_id: Optional[int],
+    ) -> Optional[int]:
+        if track_id is not None:
+            for index, pending in enumerate(self.pending_anomalies):
+                if (
+                    pending.label == label
+                    and pending.track_id == track_id
+                    and _distance_xy(pending.object_pose, object_pose)
+                    <= self.config.marker_association_radius_m
+                ):
+                    return index
         radius = max(0.01, self.config.cluster_merge_radius_m)
         nearest_index = None
         nearest_distance = float("inf")
@@ -515,6 +653,8 @@ class JetsonYoloRosbridgeClient:
             cluster_id=cluster.cluster_id,
             cluster_count=cluster.count,
             cluster_merge_radius_m=self.config.cluster_merge_radius_m,
+            distance_estimate=group.distance_estimate,
+            bearing_source=group.bearing_source,
             ttl_sec=self.config.marker_ttl_s,
             original_image=original_path,
             annotated_image=annotated_path,
@@ -535,49 +675,68 @@ class JetsonYoloRosbridgeClient:
             cluster.count,
         )
 
-    def _distance_for_detection(self, detection: Detection, image_width: int, image_height: int) -> Optional[float]:
+    def _distance_for_detection(
+        self,
+        detection: Detection,
+        image_width: int,
+        image_height: int,
+        source_msg: Dict[str, Any],
+    ) -> DistanceEstimate:
         if self.config.use_depth_distance:
-            distance_m = self._depth_distance_for_detection(detection, image_width, image_height)
-            if distance_m is not None:
-                return distance_m
+            measurement = self._depth_distance_for_detection(
+                detection, image_width, image_height, source_msg
+            )
+            if measurement is not None:
+                return measurement
 
-        if not self.config.use_laser_distance:
-            return None
-        if self.latest_scan is None:
-            self._log_missing_scan()
-            return None
-        distance_m = estimate_laser_distance_m(
-            scan=self.latest_scan,
-            bbox_xyxy=detection.bbox_xyxy,
-            image_width=image_width,
-            camera_horizontal_fov_deg=self.config.camera_horizontal_fov_deg,
-            camera_yaw_offset_deg=self.config.camera_yaw_offset_deg,
-            half_window_deg=self.config.laser_window_deg,
-            min_distance_m=self.config.laser_min_distance_m,
-            max_distance_m=self.config.laser_max_distance_m,
+        if self.config.use_laser_distance:
+            if self.latest_scan is None:
+                self._log_missing_scan()
+            else:
+                distance_m = estimate_laser_distance_m(
+                    scan=self.latest_scan,
+                    bbox_xyxy=detection.bbox_xyxy,
+                    image_width=image_width,
+                    camera_horizontal_fov_deg=self.config.camera_horizontal_fov_deg,
+                    camera_yaw_offset_deg=self.config.camera_yaw_offset_deg,
+                    half_window_deg=self.config.laser_window_deg,
+                    min_distance_m=self.config.laser_min_distance_m,
+                    max_distance_m=self.config.laser_max_distance_m,
+                    camera_intrinsics=(
+                        self.camera_intrinsics if self.config.use_camera_intrinsics else None
+                    ),
+                )
+                if distance_m is not None:
+                    return DistanceEstimate(
+                        distance_m=distance_m,
+                        source="laser",
+                        uncertainty_m=self.config.laser_distance_uncertainty_m,
+                    )
+                LOGGER.info(
+                    "No valid %s range for %s bbox; falling back to %.2f m",
+                    self.config.scan_topic,
+                    detection.label,
+                    self.config.default_anomaly_distance_m,
+                )
+        return DistanceEstimate(
+            distance_m=self.config.default_anomaly_distance_m,
+            source="default",
+            uncertainty_m=self.config.default_distance_uncertainty_m,
         )
-        if distance_m is None:
-            LOGGER.info(
-                "No valid %s range for %s bbox; falling back to %.2f m",
-                self.config.scan_topic,
-                detection.label,
-                self.config.default_anomaly_distance_m,
-        )
-        return distance_m
 
     def _depth_distance_for_detection(
         self,
         detection: Detection,
         image_width: int,
         image_height: int,
-    ) -> Optional[float]:
-        depth = self.latest_depth
-        if depth is None:
+        source_msg: Dict[str, Any],
+    ) -> Optional[DistanceEstimate]:
+        selected = self._select_depth_frame(source_msg)
+        if selected is None:
             return None
-        if time.monotonic() - self.latest_depth_received_at > self.config.depth_max_age_s:
-            return None
+        depth, age_s = selected
         try:
-            distance_m = estimate_depth_distance_m(
+            measurement = estimate_depth_measurement(
                 depth_image=depth,
                 bbox_xyxy=detection.bbox_xyxy,
                 image_width=image_width,
@@ -587,14 +746,53 @@ class JetsonYoloRosbridgeClient:
                 roi_scale=self.config.depth_roi_scale,
                 min_valid_pixels=self.config.depth_min_valid_pixels,
                 percentile=self.config.depth_distance_percentile,
+                age_s=age_s,
+                object_mask=detection.mask if self.config.segmentation_enabled else None,
+                mask_erode_px=self.config.segmentation_depth_mask_erode_px,
             )
         except Exception as exc:
             LOGGER.warning("Failed to estimate depth distance: %s", exc)
             return None
 
-        if distance_m is not None:
-            LOGGER.debug("Using depth distance %.2f m for %s", distance_m, detection.label)
-        return distance_m
+        if measurement is not None:
+            LOGGER.debug(
+                "Using depth distance %.2f m (uncertainty %.3f m, age %.3f s) for %s",
+                measurement.distance_m,
+                measurement.uncertainty_m or 0.0,
+                measurement.age_s or 0.0,
+                detection.label,
+            )
+        return measurement
+
+    def _select_depth_frame(
+        self, source_msg: Dict[str, Any]
+    ) -> Optional[tuple[np.ndarray, float]]:
+        if not self.depth_buffer:
+            return None
+        now = time.monotonic()
+        camera_stamp = header_stamp_seconds(source_msg)
+        candidates = [
+            item for item in self.depth_buffer if now - item[1] <= self.config.depth_max_age_s
+        ]
+        if not candidates:
+            return None
+
+        if camera_stamp is not None and self.config.depth_sync_tolerance_s > 0.0:
+            stamped = [item for item in candidates if item[0] is not None]
+            if stamped:
+                selected = min(stamped, key=lambda item: abs(float(item[0]) - camera_stamp))
+                timestamp_delta = abs(float(selected[0]) - camera_stamp)
+                if timestamp_delta > self.config.depth_sync_tolerance_s:
+                    LOGGER.debug(
+                        "Closest depth frame is %.3f s from RGB frame (limit %.3f s)",
+                        timestamp_delta,
+                        self.config.depth_sync_tolerance_s,
+                    )
+                    return None
+                return selected[2], timestamp_delta
+
+        selected = candidates[-1]
+        return selected[2], now - selected[1]
 
     def _publish_debug_stream_if_due(
         self,
@@ -610,6 +808,32 @@ class JetsonYoloRosbridgeClient:
         self.next_debug_image_publish = now + (1.0 / self.config.debug_image_publish_hz)
         debug_frame = annotate_frame(frame.copy(), detections) if detections else frame
         self._publish_debug_image(debug_frame, source_msg)
+
+    def _publish_privacy_stream_if_due(
+        self,
+        detections: List[Detection],
+        frame: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> None:
+        if not self.config.privacy_image_enabled:
+            return
+        now = time.monotonic()
+        if now < self.next_privacy_image_publish:
+            return
+        self.next_privacy_image_publish = now + (
+            1.0 / self.config.privacy_image_publish_hz
+        )
+        privacy_frame = blur_except_detections(
+            frame,
+            detections,
+            kernel_size=self.config.privacy_blur_kernel_size,
+            padding_ratio=self.config.privacy_bbox_padding_ratio,
+            use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+            draw_track_id=self.config.privacy_draw_track_id,
+            draw_mask_overlay=self.config.privacy_draw_mask_overlay,
+            mask_overlay_alpha=self.config.privacy_mask_overlay_alpha,
+        )
+        self._publish_privacy_image(privacy_frame, source_msg)
 
     def _daily_map_path(self) -> Path:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -671,6 +895,18 @@ class JetsonYoloRosbridgeClient:
             compressed_image_msg(encoded, "jpeg", frame_id=frame_id, stamp=stamp),
         )
 
+    def _publish_privacy_image(
+        self, image: np.ndarray, source_msg: Dict[str, Any]
+    ) -> None:
+        header = source_msg.get("header") or {}
+        stamp = header.get("stamp")
+        frame_id = header.get("frame_id") or "camera"
+        encoded = encode_image(image, ".jpg", quality=self.config.jpeg_quality)
+        self.rosbridge.publish(
+            self.config.privacy_image_topic,
+            compressed_image_msg(encoded, "jpeg", frame_id=frame_id, stamp=stamp),
+        )
+
     def _publish_map_snapshot(self, image: np.ndarray, source_msg: Dict[str, Any]) -> None:
         del source_msg
         encoded = encode_image(image, ".png")
@@ -716,9 +952,20 @@ def annotate_frame(frame: np.ndarray, detections: List[Detection]) -> np.ndarray
     font_scale = max(0.35, min(0.55, width / 1280.0))
     thickness = max(1, int(round(width / 640.0)))
     for detection in detections:
+        mask = _normalized_detection_mask(detection, height, width)
+        if mask is not None:
+            tint = np.zeros_like(frame)
+            tint[:, :, 1] = 220
+            blended = cv2.addWeighted(frame, 0.75, tint, 0.25, 0.0)
+            frame[mask] = blended[mask]
+            contours, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(frame, contours, -1, (0, 255, 0), thickness)
         x1, y1, x2, y2 = detection.bbox_xyxy
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), thickness)
-        label = f"{detection.label} {detection.confidence:.2f}"
+        track_text = f" #{detection.track_id}" if detection.track_id is not None else ""
+        label = f"{detection.label}{track_text} {detection.confidence:.2f}"
         (text_width, text_height), baseline = cv2.getTextSize(
             label,
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -746,6 +993,106 @@ def annotate_frame(frame: np.ndarray, detections: List[Detection]) -> np.ndarray
             cv2.LINE_AA,
         )
     return frame
+
+
+def blur_except_detections(
+    frame: np.ndarray,
+    detections: List[Detection],
+    kernel_size: int,
+    padding_ratio: float = 0.0,
+    use_segmentation_masks: bool = True,
+    draw_track_id: bool = False,
+    draw_mask_overlay: bool = False,
+    mask_overlay_alpha: float = 0.25,
+) -> np.ndarray:
+    if frame.size == 0:
+        return frame.copy()
+
+    kernel = max(3, int(kernel_size))
+    if kernel % 2 == 0:
+        kernel += 1
+    output = cv2.GaussianBlur(frame, (kernel, kernel), 0)
+    height, width = frame.shape[:2]
+    padding = max(0.0, min(0.5, float(padding_ratio)))
+    overlay_alpha = max(0.0, min(1.0, float(mask_overlay_alpha)))
+
+    for detection in detections:
+        x1, y1, x2, y2 = [int(value) for value in detection.bbox_xyxy]
+        pad_x = int(round(max(0, x2 - x1) * padding))
+        pad_y = int(round(max(0, y2 - y1) * padding))
+        x1 = max(0, min(width, x1 - pad_x))
+        y1 = max(0, min(height, y1 - pad_y))
+        x2 = max(0, min(width, x2 + pad_x))
+        y2 = max(0, min(height, y2 + pad_y))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        mask = (
+            _normalized_detection_mask(detection, height, width)
+            if use_segmentation_masks
+            else None
+        )
+        if mask is not None:
+            dilation_px = max(pad_x, pad_y)
+            if dilation_px > 0:
+                kernel_width = dilation_px * 2 + 1
+                mask = cv2.dilate(
+                    mask.astype(np.uint8),
+                    np.ones((kernel_width, kernel_width), dtype=np.uint8),
+                ).astype(bool)
+            output[mask] = frame[mask]
+            if draw_mask_overlay and overlay_alpha > 0.0:
+                tint = np.zeros_like(output)
+                tint[:, :, 1] = 220
+                blended = cv2.addWeighted(
+                    output, 1.0 - overlay_alpha, tint, overlay_alpha, 0.0
+                )
+                output[mask] = blended[mask]
+                contours, _ = cv2.findContours(
+                    mask.astype(np.uint8),
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                cv2.drawContours(output, contours, -1, (0, 255, 0), 2)
+        else:
+            output[y1:y2, x1:x2] = frame[y1:y2, x1:x2]
+
+        if draw_track_id and detection.track_id is not None:
+            label = f"{detection.label} #{detection.track_id}"
+            text_y = max(18, y1 - 6)
+            cv2.putText(
+                output,
+                label,
+                (x1, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+    return output
+
+
+def _normalized_detection_mask(
+    detection: Detection, height: int, width: int
+) -> Optional[np.ndarray]:
+    if detection.mask is None or detection.mask.size == 0:
+        return None
+    mask = np.asarray(detection.mask, dtype=np.uint8)
+    mask = np.squeeze(mask)
+    if mask.ndim != 2:
+        return None
+    if mask.shape != (height, width):
+        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+    return mask.astype(bool)
+
+
+def _best_track_id(detections: List[Detection]) -> Optional[int]:
+    tracked = [item for item in detections if item.track_id is not None]
+    if not tracked:
+        return None
+    return max(tracked, key=lambda item: item.confidence).track_id
 
 
 def _write_image(path: Path, image: np.ndarray) -> None:

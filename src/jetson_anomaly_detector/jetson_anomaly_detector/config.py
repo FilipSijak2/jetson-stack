@@ -57,10 +57,12 @@ class AppConfig:
     robot_pose_topic: str = "/robot_pose_map"
     scan_topic: str = "/scan"
     depth_topic: str = "/camera/realsense/aligned_depth_to_color/image_raw"
+    camera_info_topic: str = "/camera/realsense/color/camera_info"
     event_topic: str = "/anomaly/events"
     readable_event_topic: str = "/anomaly/events/readable"
     marker_topic: str = "/anomaly/markers"
     debug_image_topic: str = "/anomaly/debug_image/compressed"
+    privacy_image_topic: str = "/anomaly/privacy_image/compressed"
     map_snapshot_topic: str = "/anomaly/map_snapshot/compressed"
     artifact_root: str = "/home/jetson/anomaly_logs"
     anomaly_classes: List[str] = None  # type: ignore[assignment]
@@ -80,19 +82,37 @@ class AppConfig:
     default_anomaly_distance_m: float = 1.5
     camera_horizontal_fov_deg: float = 69.0
     camera_yaw_offset_deg: float = 0.0
+    use_camera_intrinsics: bool = True
     use_depth_distance: bool = True
     depth_throttle_ms: int = 200
     depth_max_age_s: float = 1.0
+    depth_sync_tolerance_s: float = 0.25
+    depth_buffer_size: int = 8
     depth_roi_scale: float = 0.60
     depth_min_valid_pixels: int = 20
     depth_distance_percentile: float = 50.0
     depth_min_distance_m: float = 0.15
     depth_max_distance_m: float = 6.0
+    default_distance_uncertainty_m: float = 0.75
     use_laser_distance: bool = True
     laser_window_deg: float = 6.0
     laser_min_distance_m: float = 0.10
     laser_max_distance_m: float = 4.0
+    laser_distance_uncertainty_m: float = 0.10
     yolo_model_path: str = "yolov8n.pt"
+    yolo_image_size: int = 640
+    yolo_iou_threshold: float = 0.70
+    yolo_max_detections: int = 20
+    yolo_device: str = "0"
+    yolo_half: bool = True
+    yolo_augment: bool = False
+    yolo_agnostic_nms: bool = False
+    yolo_filter_classes: bool = True
+    tracking_enabled: bool = True
+    tracking_backend: str = "bytetrack.yaml"
+    tracking_confidence_threshold: float = 0.25
+    segmentation_enabled: bool = True
+    segmentation_depth_mask_erode_px: int = 2
     mock_mode: bool = False
     inference_every_n_frames: int = 1
     reconnect_delay_s: float = 3.0
@@ -103,6 +123,20 @@ class AppConfig:
     debug_image_always_stream: bool = True
     debug_image_on_detection: bool = True
     debug_image_publish_hz: float = 2.0
+    privacy_image_enabled: bool = True
+    privacy_image_publish_hz: float = 2.0
+    privacy_blur_kernel_size: int = 51
+    privacy_bbox_padding_ratio: float = 0.03
+    privacy_use_segmentation_masks: bool = True
+    privacy_draw_track_id: bool = True
+    privacy_draw_mask_overlay: bool = True
+    privacy_mask_overlay_alpha: float = 0.25
+    marker_ray_enabled: bool = True
+    marker_uncertainty_enabled: bool = True
+    marker_uncertainty_sigma_scale: float = 2.0
+    marker_uncertainty_min_radius_m: float = 0.05
+    marker_uncertainty_max_radius_m: float = 1.0
+    marker_aux_line_width_m: float = 0.025
     map_frame_id: str = "map"
 
     def __post_init__(self) -> None:
@@ -117,10 +151,12 @@ ENV_OVERRIDES = {
     "robot_pose_topic": ("ROBOT_POSE_TOPIC", _env_str),
     "scan_topic": ("SCAN_TOPIC", _env_str),
     "depth_topic": ("DEPTH_TOPIC", _env_str),
+    "camera_info_topic": ("CAMERA_INFO_TOPIC", _env_str),
     "event_topic": ("EVENT_TOPIC", _env_str),
     "readable_event_topic": ("READABLE_EVENT_TOPIC", _env_str),
     "marker_topic": ("MARKER_TOPIC", _env_str),
     "debug_image_topic": ("DEBUG_IMAGE_TOPIC", _env_str),
+    "privacy_image_topic": ("PRIVACY_IMAGE_TOPIC", _env_str),
     "map_snapshot_topic": ("MAP_SNAPSHOT_TOPIC", _env_str),
     "artifact_root": ("JETSON_ARTIFACT_ROOT", _env_str),
     "anomaly_classes": ("ANOMALY_CLASSES", _env_list),
@@ -140,19 +176,37 @@ ENV_OVERRIDES = {
     "default_anomaly_distance_m": ("DEFAULT_ANOMALY_DISTANCE_M", _env_float),
     "camera_horizontal_fov_deg": ("CAMERA_HORIZONTAL_FOV_DEG", _env_float),
     "camera_yaw_offset_deg": ("CAMERA_YAW_OFFSET_DEG", _env_float),
+    "use_camera_intrinsics": ("USE_CAMERA_INTRINSICS", _env_bool),
     "use_depth_distance": ("USE_DEPTH_DISTANCE", _env_bool),
     "depth_throttle_ms": ("DEPTH_THROTTLE_MS", _env_int),
     "depth_max_age_s": ("DEPTH_MAX_AGE_S", _env_float),
+    "depth_sync_tolerance_s": ("DEPTH_SYNC_TOLERANCE_S", _env_float),
+    "depth_buffer_size": ("DEPTH_BUFFER_SIZE", _env_int),
     "depth_roi_scale": ("DEPTH_ROI_SCALE", _env_float),
     "depth_min_valid_pixels": ("DEPTH_MIN_VALID_PIXELS", _env_int),
     "depth_distance_percentile": ("DEPTH_DISTANCE_PERCENTILE", _env_float),
     "depth_min_distance_m": ("DEPTH_MIN_DISTANCE_M", _env_float),
     "depth_max_distance_m": ("DEPTH_MAX_DISTANCE_M", _env_float),
+    "default_distance_uncertainty_m": ("DEFAULT_DISTANCE_UNCERTAINTY_M", _env_float),
     "use_laser_distance": ("USE_LASER_DISTANCE", _env_bool),
     "laser_window_deg": ("LASER_WINDOW_DEG", _env_float),
     "laser_min_distance_m": ("LASER_MIN_DISTANCE_M", _env_float),
     "laser_max_distance_m": ("LASER_MAX_DISTANCE_M", _env_float),
+    "laser_distance_uncertainty_m": ("LASER_DISTANCE_UNCERTAINTY_M", _env_float),
     "yolo_model_path": ("YOLO_MODEL_PATH", _env_str),
+    "yolo_image_size": ("YOLO_IMAGE_SIZE", _env_int),
+    "yolo_iou_threshold": ("YOLO_IOU_THRESHOLD", _env_float),
+    "yolo_max_detections": ("YOLO_MAX_DETECTIONS", _env_int),
+    "yolo_device": ("YOLO_DEVICE", _env_str),
+    "yolo_half": ("YOLO_HALF", _env_bool),
+    "yolo_augment": ("YOLO_AUGMENT", _env_bool),
+    "yolo_agnostic_nms": ("YOLO_AGNOSTIC_NMS", _env_bool),
+    "yolo_filter_classes": ("YOLO_FILTER_CLASSES", _env_bool),
+    "tracking_enabled": ("TRACKING_ENABLED", _env_bool),
+    "tracking_backend": ("TRACKING_BACKEND", _env_str),
+    "tracking_confidence_threshold": ("TRACKING_CONFIDENCE_THRESHOLD", _env_float),
+    "segmentation_enabled": ("SEGMENTATION_ENABLED", _env_bool),
+    "segmentation_depth_mask_erode_px": ("SEGMENTATION_DEPTH_MASK_ERODE_PX", _env_int),
     "mock_mode": ("MOCK_MODE", _env_bool),
     "inference_every_n_frames": ("INFERENCE_EVERY_N_FRAMES", _env_int),
     "reconnect_delay_s": ("ROSBRIDGE_RECONNECT_DELAY_S", _env_float),
@@ -163,6 +217,20 @@ ENV_OVERRIDES = {
     "debug_image_always_stream": ("DEBUG_IMAGE_ALWAYS_STREAM", _env_bool),
     "debug_image_on_detection": ("DEBUG_IMAGE_ON_DETECTION", _env_bool),
     "debug_image_publish_hz": ("DEBUG_IMAGE_PUBLISH_HZ", _env_float),
+    "privacy_image_enabled": ("PRIVACY_IMAGE_ENABLED", _env_bool),
+    "privacy_image_publish_hz": ("PRIVACY_IMAGE_PUBLISH_HZ", _env_float),
+    "privacy_blur_kernel_size": ("PRIVACY_BLUR_KERNEL_SIZE", _env_int),
+    "privacy_bbox_padding_ratio": ("PRIVACY_BBOX_PADDING_RATIO", _env_float),
+    "privacy_use_segmentation_masks": ("PRIVACY_USE_SEGMENTATION_MASKS", _env_bool),
+    "privacy_draw_track_id": ("PRIVACY_DRAW_TRACK_ID", _env_bool),
+    "privacy_draw_mask_overlay": ("PRIVACY_DRAW_MASK_OVERLAY", _env_bool),
+    "privacy_mask_overlay_alpha": ("PRIVACY_MASK_OVERLAY_ALPHA", _env_float),
+    "marker_ray_enabled": ("MARKER_RAY_ENABLED", _env_bool),
+    "marker_uncertainty_enabled": ("MARKER_UNCERTAINTY_ENABLED", _env_bool),
+    "marker_uncertainty_sigma_scale": ("MARKER_UNCERTAINTY_SIGMA_SCALE", _env_float),
+    "marker_uncertainty_min_radius_m": ("MARKER_UNCERTAINTY_MIN_RADIUS_M", _env_float),
+    "marker_uncertainty_max_radius_m": ("MARKER_UNCERTAINTY_MAX_RADIUS_M", _env_float),
+    "marker_aux_line_width_m": ("MARKER_AUX_LINE_WIDTH_M", _env_float),
     "map_frame_id": ("MAP_FRAME_ID", _env_str),
 }
 
@@ -199,6 +267,31 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["inference_every_n_frames"] = max(1, int(normalized.get("inference_every_n_frames", 1)))
     normalized["jpeg_quality"] = max(1, min(100, int(normalized.get("jpeg_quality", 85))))
     normalized["debug_image_publish_hz"] = max(0.1, float(normalized.get("debug_image_publish_hz", 2.0)))
+    normalized["privacy_image_publish_hz"] = max(
+        0.1, float(normalized.get("privacy_image_publish_hz", 2.0))
+    )
+    normalized["privacy_blur_kernel_size"] = max(
+        3, int(normalized.get("privacy_blur_kernel_size", 51))
+    )
+    normalized["privacy_bbox_padding_ratio"] = max(
+        0.0, min(0.5, float(normalized.get("privacy_bbox_padding_ratio", 0.03)))
+    )
+    normalized["privacy_mask_overlay_alpha"] = max(
+        0.0, min(1.0, float(normalized.get("privacy_mask_overlay_alpha", 0.25)))
+    )
+    normalized["marker_uncertainty_sigma_scale"] = max(
+        0.0, float(normalized.get("marker_uncertainty_sigma_scale", 2.0))
+    )
+    normalized["marker_uncertainty_min_radius_m"] = max(
+        0.0, float(normalized.get("marker_uncertainty_min_radius_m", 0.05))
+    )
+    normalized["marker_uncertainty_max_radius_m"] = max(
+        normalized["marker_uncertainty_min_radius_m"],
+        float(normalized.get("marker_uncertainty_max_radius_m", 1.0)),
+    )
+    normalized["marker_aux_line_width_m"] = max(
+        0.005, float(normalized.get("marker_aux_line_width_m", 0.025))
+    )
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
     normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))
     normalized["marker_association_radius_m"] = max(
@@ -216,6 +309,10 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     )
     normalized["depth_throttle_ms"] = max(0, int(normalized.get("depth_throttle_ms", 200)))
     normalized["depth_max_age_s"] = max(0.1, float(normalized.get("depth_max_age_s", 1.0)))
+    normalized["depth_sync_tolerance_s"] = max(
+        0.0, float(normalized.get("depth_sync_tolerance_s", 0.25))
+    )
+    normalized["depth_buffer_size"] = max(1, int(normalized.get("depth_buffer_size", 8)))
     normalized["depth_roi_scale"] = max(0.1, min(1.0, float(normalized.get("depth_roi_scale", 0.60))))
     normalized["depth_min_valid_pixels"] = max(1, int(normalized.get("depth_min_valid_pixels", 20)))
     normalized["depth_distance_percentile"] = max(
@@ -227,6 +324,23 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
         normalized["depth_min_distance_m"],
         float(normalized.get("depth_max_distance_m", 6.0)),
     )
+    normalized["default_distance_uncertainty_m"] = max(
+        0.0, float(normalized.get("default_distance_uncertainty_m", 0.75))
+    )
+    normalized["yolo_image_size"] = max(32, int(normalized.get("yolo_image_size", 640)))
+    normalized["yolo_iou_threshold"] = max(
+        0.0, min(1.0, float(normalized.get("yolo_iou_threshold", 0.70)))
+    )
+    normalized["yolo_max_detections"] = max(1, int(normalized.get("yolo_max_detections", 20)))
+    normalized["tracking_backend"] = str(
+        normalized.get("tracking_backend", "bytetrack.yaml")
+    ).strip() or "bytetrack.yaml"
+    normalized["tracking_confidence_threshold"] = max(
+        0.0, min(1.0, float(normalized.get("tracking_confidence_threshold", 0.25)))
+    )
+    normalized["segmentation_depth_mask_erode_px"] = max(
+        0, int(normalized.get("segmentation_depth_mask_erode_px", 2))
+    )
     normalized["marker_object_size_m"] = max(0.05, float(normalized.get("marker_object_size_m", 0.20)))
     normalized["marker_text_height_m"] = max(0.01, float(normalized.get("marker_text_height_m", 0.08)))
     normalized["marker_text_z_offset_m"] = max(0.0, float(normalized.get("marker_text_z_offset_m", 0.18)))
@@ -235,5 +349,8 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["laser_max_distance_m"] = max(
         normalized["laser_min_distance_m"],
         float(normalized.get("laser_max_distance_m", 4.0)),
+    )
+    normalized["laser_distance_uncertainty_m"] = max(
+        0.0, float(normalized.get("laser_distance_uncertainty_m", 0.10))
     )
     return AppConfig(**normalized)

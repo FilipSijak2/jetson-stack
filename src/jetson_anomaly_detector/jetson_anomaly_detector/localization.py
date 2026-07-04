@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 from typing import Optional, Sequence
 
+import cv2
 import numpy as np
 
-from .models import LaserScan, ObjectPoseMap, RobotPoseMap
+from .models import CameraIntrinsics, DistanceEstimate, LaserScan, ObjectPoseMap, RobotPoseMap
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -26,6 +27,22 @@ def bbox_bearing_offset_rad(
     return math.radians(camera_yaw_offset_deg) - normalized * math.radians(camera_horizontal_fov_deg)
 
 
+def bbox_bearing_intrinsics_rad(
+    bbox_xyxy: Sequence[int],
+    image_width: int,
+    intrinsics: CameraIntrinsics,
+    camera_yaw_offset_deg: float = 0.0,
+) -> float:
+    if image_width <= 0 or intrinsics.width <= 0 or intrinsics.fx <= 0.0:
+        return math.radians(camera_yaw_offset_deg)
+    scale_x = float(image_width) / float(intrinsics.width)
+    fx = intrinsics.fx * scale_x
+    cx = intrinsics.cx * scale_x
+    center_x = (float(bbox_xyxy[0]) + float(bbox_xyxy[2])) * 0.5
+    # Camera x grows right; ROS positive yaw grows left.
+    return math.radians(camera_yaw_offset_deg) - math.atan2(center_x - cx, fx)
+
+
 def estimate_laser_distance_m(
     scan: LaserScan,
     bbox_xyxy: Sequence[int],
@@ -35,16 +52,22 @@ def estimate_laser_distance_m(
     half_window_deg: float,
     min_distance_m: float,
     max_distance_m: float,
+    camera_intrinsics: Optional[CameraIntrinsics] = None,
 ) -> Optional[float]:
     if scan.ranges.size == 0 or scan.angle_increment == 0.0:
         return None
 
-    target_bearing = bbox_bearing_offset_rad(
-        bbox_xyxy,
-        image_width,
-        camera_horizontal_fov_deg,
-        camera_yaw_offset_deg,
-    )
+    if camera_intrinsics is not None:
+        target_bearing = bbox_bearing_intrinsics_rad(
+            bbox_xyxy, image_width, camera_intrinsics, camera_yaw_offset_deg
+        )
+    else:
+        target_bearing = bbox_bearing_offset_rad(
+            bbox_xyxy,
+            image_width,
+            camera_horizontal_fov_deg,
+            camera_yaw_offset_deg,
+        )
     half_window = math.radians(max(0.1, half_window_deg))
     scan_max = scan.range_max if math.isfinite(scan.range_max) and scan.range_max > 0.0 else max_distance_m
     lower = max(min_distance_m, scan.range_min)
@@ -109,6 +132,71 @@ def estimate_depth_distance_m(
     return float(np.percentile(valid, max(0.0, min(100.0, float(percentile)))))
 
 
+def estimate_depth_measurement(
+    depth_image: np.ndarray,
+    bbox_xyxy: Sequence[int],
+    image_width: int,
+    image_height: int,
+    min_distance_m: float,
+    max_distance_m: float,
+    roi_scale: float,
+    min_valid_pixels: int,
+    percentile: float = 50.0,
+    age_s: Optional[float] = None,
+    object_mask: Optional[np.ndarray] = None,
+    mask_erode_px: int = 0,
+) -> Optional[DistanceEstimate]:
+    if depth_image.size == 0 or image_width <= 0 or image_height <= 0:
+        return None
+    depth_height, depth_width = depth_image.shape[:2]
+    x1, y1, x2, y2 = [float(value) for value in bbox_xyxy[:4]]
+    center_x = (x1 + x2) * 0.5
+    center_y = (y1 + y2) * 0.5
+    half_width = max(0.5, (x2 - x1) * max(0.1, min(1.0, roi_scale)) * 0.5)
+    half_height = max(0.5, (y2 - y1) * max(0.1, min(1.0, roi_scale)) * 0.5)
+    sx = float(depth_width) / float(image_width)
+    sy = float(depth_height) / float(image_height)
+    dx1 = max(0, int(math.floor((center_x - half_width) * sx)))
+    dy1 = max(0, int(math.floor((center_y - half_height) * sy)))
+    dx2 = min(depth_width, int(math.ceil((center_x + half_width) * sx)))
+    dy2 = min(depth_height, int(math.ceil((center_y + half_height) * sy)))
+    if dx2 <= dx1 or dy2 <= dy1:
+        return None
+
+    roi = depth_image[dy1:dy2, dx1:dx2]
+    selection = np.isfinite(roi)
+    if object_mask is not None and object_mask.size > 0:
+        mask = np.asarray(object_mask, dtype=np.uint8)
+        if mask.shape != (depth_height, depth_width):
+            mask = cv2.resize(
+                mask,
+                (depth_width, depth_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        if mask_erode_px > 0:
+            mask = cv2.erode(
+                mask,
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=int(mask_erode_px),
+            )
+        selection &= mask[dy1:dy2, dx1:dx2].astype(bool)
+    valid = roi[selection]
+    valid = valid[(valid >= min_distance_m) & (valid <= max_distance_m)]
+    if valid.size < max(1, int(min_valid_pixels)):
+        return None
+
+    distance = float(np.percentile(valid, max(0.0, min(100.0, float(percentile)))))
+    median = float(np.median(valid))
+    robust_sigma = 1.4826 * float(np.median(np.abs(valid - median)))
+    return DistanceEstimate(
+        distance_m=distance,
+        source="depth",
+        uncertainty_m=max(0.005, robust_sigma),
+        valid_sample_count=int(valid.size),
+        age_s=age_s,
+    )
+
+
 def estimate_object_pose_map(
     robot_pose: RobotPoseMap,
     bbox_xyxy: Sequence[int],
@@ -117,15 +205,25 @@ def estimate_object_pose_map(
     camera_horizontal_fov_deg: float,
     camera_yaw_offset_deg: float = 0.0,
     measured_distance_m: Optional[float] = None,
+    camera_intrinsics: Optional[CameraIntrinsics] = None,
+    measured_distance_is_axial: bool = False,
 ) -> ObjectPoseMap:
-    bearing_offset = bbox_bearing_offset_rad(
-        bbox_xyxy,
-        image_width,
-        camera_horizontal_fov_deg,
-        camera_yaw_offset_deg,
-    )
+    if camera_intrinsics is not None:
+        bearing_offset = bbox_bearing_intrinsics_rad(
+            bbox_xyxy, image_width, camera_intrinsics, camera_yaw_offset_deg
+        )
+    else:
+        bearing_offset = bbox_bearing_offset_rad(
+            bbox_xyxy,
+            image_width,
+            camera_horizontal_fov_deg,
+            camera_yaw_offset_deg,
+        )
     bearing = robot_pose.yaw + bearing_offset
     distance = measured_distance_m if measured_distance_m is not None else default_distance_m
+    if measured_distance_is_axial:
+        cosine = max(0.1, abs(math.cos(bearing_offset - math.radians(camera_yaw_offset_deg))))
+        distance = float(distance) / cosine
     distance = max(0.05, float(distance))
     return ObjectPoseMap(
         x=robot_pose.x + distance * math.cos(bearing),

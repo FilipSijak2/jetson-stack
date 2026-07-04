@@ -2,4 +2,7 @@
 # CUDA 12.6-compatible wheels first, then installs these helper packages and
 # ultralytics with --no-deps so pip cannot replace torch with a desktop wheel.
 ultralytics-thop>=2.0.0,<2.1.0
+# Ultralytics ByteTrack/BoT-SORT linear-assignment backend. Pin the compatible
+# pre-1.0 series explicitly because ultralytics itself is installed --no-deps.
+lapx>=0.5.2,<0.6.0
 

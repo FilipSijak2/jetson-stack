@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import cv2
 import numpy as np
 
-from .models import LaserScan, OccupancyGridMap, RobotPoseMap
+from .models import CameraIntrinsics, LaserScan, OccupancyGridMap, RobotPoseMap
 
 
 def ros_time_now() -> Dict[str, int]:
@@ -162,6 +162,38 @@ def parse_laser_scan(msg: Dict[str, Any]) -> LaserScan:
         range_max=_float_or_default(msg.get("range_max"), float("inf")),
         ranges=ranges,
     )
+
+
+def parse_camera_info(msg: Dict[str, Any]) -> CameraIntrinsics:
+    width = int(msg.get("width", 0))
+    height = int(msg.get("height", 0))
+    k = msg.get("k", msg.get("K", []))
+    p = msg.get("p", msg.get("P", []))
+
+    # The configured input is normally color/image_raw, so K is preferred.
+    # P is a useful fallback when the source is a rectified image.
+    if isinstance(k, list) and len(k) >= 9 and float(k[0]) > 0.0 and float(k[4]) > 0.0:
+        fx, fy, cx, cy = float(k[0]), float(k[4]), float(k[2]), float(k[5])
+    elif isinstance(p, list) and len(p) >= 12 and float(p[0]) > 0.0 and float(p[5]) > 0.0:
+        fx, fy, cx, cy = float(p[0]), float(p[5]), float(p[2]), float(p[6])
+    else:
+        raise ValueError("CameraInfo has no valid K or P intrinsic matrix")
+
+    if width <= 0 or height <= 0:
+        raise ValueError("CameraInfo has invalid image dimensions")
+    return CameraIntrinsics(fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height)
+
+
+def header_stamp_seconds(msg: Dict[str, Any]) -> Optional[float]:
+    header = msg.get("header") or {}
+    stamp = header.get("stamp") or {}
+    try:
+        sec = float(stamp.get("sec", stamp.get("secs", 0)))
+        nanosec = float(stamp.get("nanosec", stamp.get("nsecs", 0)))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    value = sec + nanosec * 1e-9
+    return value if value > 0.0 else None
 
 
 def quaternion_to_yaw(q: Dict[str, Any]) -> float:

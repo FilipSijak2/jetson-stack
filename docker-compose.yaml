@@ -10,6 +10,7 @@ services:
       - ./config/containers/jetson_anomaly.env
     volumes:
       - ./config:/workspace/config:ro
+      - ./models:/workspace/models
       - ./anomaly_logs:/home/jetson/anomaly_logs
       - ./logs:/workspace/logs
     healthcheck:

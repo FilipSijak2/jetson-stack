@@ -20,6 +20,7 @@ set -euo pipefail
 
 mkdir -p "${JETSON_ARTIFACT_ROOT}"
 mkdir -p "${JETSON_LOG_DIR}"
+mkdir -p /workspace/models
 
 LOG_FILE="${JETSON_LOG_DIR}/jetson_anomaly_$(date -u '+%Y%m%d').log"
 exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -54,5 +55,6 @@ except Exception as exc:
 PY
 
 export PYTHONPATH="/workspace/src/jetson_anomaly_detector:${PYTHONPATH:-}"
+cd /workspace/models
 exec python3 -m jetson_anomaly_detector.jetson_yolo_rosbridge_client \
   --config "${ANOMALY_CONFIG_FILE}"
