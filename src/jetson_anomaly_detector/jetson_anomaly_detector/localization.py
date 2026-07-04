@@ -6,7 +6,14 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 
-from .models import CameraIntrinsics, DistanceEstimate, LaserScan, ObjectPoseMap, RobotPoseMap
+from .models import (
+    BoundingBox3D,
+    CameraIntrinsics,
+    DistanceEstimate,
+    LaserScan,
+    ObjectPoseMap,
+    RobotPoseMap,
+)
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -229,5 +236,121 @@ def estimate_object_pose_map(
         x=robot_pose.x + distance * math.cos(bearing),
         y=robot_pose.y + distance * math.sin(bearing),
         z=0.0,
+    )
+
+
+def estimate_3d_bounds_camera(
+    depth_image: np.ndarray,
+    bbox_xyxy: Sequence[int],
+    image_width: int,
+    image_height: int,
+    intrinsics: CameraIntrinsics,
+    object_mask: Optional[np.ndarray],
+    min_distance_m: float,
+    max_distance_m: float,
+    min_valid_points: int,
+    lower_percentile: float = 5.0,
+    upper_percentile: float = 95.0,
+    mask_erode_px: int = 1,
+    sample_stride: int = 2,
+    minimum_thickness_m: float = 0.05,
+) -> Optional[BoundingBox3D]:
+    if (
+        depth_image.size == 0
+        or image_width <= 0
+        or image_height <= 0
+        or intrinsics.fx <= 0.0
+        or intrinsics.fy <= 0.0
+        or intrinsics.width <= 0
+        or intrinsics.height <= 0
+    ):
+        return None
+
+    depth_height, depth_width = depth_image.shape[:2]
+    sx = float(depth_width) / float(image_width)
+    sy = float(depth_height) / float(image_height)
+    x1, y1, x2, y2 = [float(value) for value in bbox_xyxy[:4]]
+    dx1 = max(0, int(math.floor(x1 * sx)))
+    dy1 = max(0, int(math.floor(y1 * sy)))
+    dx2 = min(depth_width, int(math.ceil(x2 * sx)))
+    dy2 = min(depth_height, int(math.ceil(y2 * sy)))
+    if dx2 <= dx1 or dy2 <= dy1:
+        return None
+
+    selection = np.zeros((depth_height, depth_width), dtype=np.uint8)
+    if object_mask is not None and object_mask.size > 0:
+        mask = np.asarray(object_mask, dtype=np.uint8)
+        if mask.shape != (depth_height, depth_width):
+            mask = cv2.resize(
+                mask,
+                (depth_width, depth_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        selection = mask
+        if mask_erode_px > 0:
+            selection = cv2.erode(
+                selection,
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=int(mask_erode_px),
+            )
+    else:
+        selection[dy1:dy2, dx1:dx2] = 1
+
+    roi_gate = np.zeros_like(selection)
+    roi_gate[dy1:dy2, dx1:dx2] = 1
+    selection &= roi_gate
+    stride = max(1, int(sample_stride))
+    if stride > 1:
+        sampled = np.zeros_like(selection)
+        sampled[::stride, ::stride] = selection[::stride, ::stride]
+        selection = sampled
+
+    valid = (
+        selection.astype(bool)
+        & np.isfinite(depth_image)
+        & (depth_image >= min_distance_m)
+        & (depth_image <= max_distance_m)
+    )
+    if int(np.count_nonzero(valid)) < max(1, int(min_valid_points)):
+        return None
+
+    initial_depths = depth_image[valid].astype(np.float32)
+    median_depth = float(np.median(initial_depths))
+    robust_sigma = 1.4826 * float(
+        np.median(np.abs(initial_depths - median_depth))
+    )
+    depth_band = max(float(minimum_thickness_m), 3.0 * robust_sigma)
+    valid &= np.abs(depth_image - median_depth) <= depth_band
+    point_count = int(np.count_nonzero(valid))
+    if point_count < max(1, int(min_valid_points)):
+        return None
+
+    vs, us = np.nonzero(valid)
+    zs = depth_image[valid].astype(np.float32)
+    intrinsics_sx = float(depth_width) / float(intrinsics.width)
+    intrinsics_sy = float(depth_height) / float(intrinsics.height)
+    fx = intrinsics.fx * intrinsics_sx
+    fy = intrinsics.fy * intrinsics_sy
+    cx = intrinsics.cx * intrinsics_sx
+    cy = intrinsics.cy * intrinsics_sy
+    xs = (us.astype(np.float32) - cx) * zs / fx
+    ys = (vs.astype(np.float32) - cy) * zs / fy
+
+    low = max(0.0, min(49.0, float(lower_percentile)))
+    high = max(51.0, min(100.0, float(upper_percentile)))
+    x_low, x_high = np.percentile(xs, [low, high])
+    y_low, y_high = np.percentile(ys, [low, high])
+    z_low, z_high = np.percentile(zs, [low, high])
+    size_x = max(0.01, float(x_high - x_low))
+    size_y = max(0.01, float(y_high - y_low))
+    size_z = max(float(minimum_thickness_m), float(z_high - z_low))
+    return BoundingBox3D(
+        center_x=float((x_low + x_high) * 0.5),
+        center_y=float((y_low + y_high) * 0.5),
+        center_z=float((z_low + z_high) * 0.5),
+        size_x=size_x,
+        size_y=size_y,
+        size_z=size_z,
+        valid_point_count=point_count,
     )
 

@@ -39,6 +39,8 @@ Jetson publishes back through rosbridge:
 - `/anomaly/events` (`std_msgs/String`, JSON)
 - `/anomaly/events/readable` (`std_msgs/String`, human-readable summary)
 - `/anomaly/markers` (`visualization_msgs/MarkerArray`, frame `map`)
+- `/anomaly/detections_3d` (`visualization_msgs/MarkerArray`, live bottle
+  wireframe in the RGB optical frame)
 - `/anomaly/debug_image/compressed` (`sensor_msgs/CompressedImage`)
 - `/anomaly/privacy_image/compressed` (`sensor_msgs/CompressedImage`, blurred
   except for detected anomaly masks or bounding-box fallback)
@@ -97,6 +99,10 @@ PRIVACY_DRAW_TRACK_ID=1
 PRIVACY_DRAW_MASK_OVERLAY=1
 MARKER_RAY_ENABLED=1
 MARKER_UNCERTAINTY_ENABLED=1
+DETECTION_3D_ENABLED=1
+DETECTION_3D_TOPIC=/anomaly/detections_3d
+DETECTION_3D_REQUIRE_MASK=1
+DETECTION_3D_PUBLISH_HZ=5
 MARKER_TTL_S=180
 MARKER_REPUBLISH_HZ=1
 DEFAULT_ANOMALY_DISTANCE_M=1.5
@@ -169,7 +175,9 @@ camera-to-map projection. Live markers use the wider
 `MARKER_ASSOCIATION_RADIUS_M` to keep one noisy physical object on one stable
 marker ID. Already reported objects are de-duplicated with
 `REPORTED_MERGE_RADIUS_M`, intentionally at least as wide as the live marker
-association radius. By default Jetson saves original/annotated camera images
+association radius. De-duplication is scoped to the current local day; older
+events remain in `events.jsonl` but do not suppress a new day's events or
+appear on a new daily map. By default Jetson saves original/annotated camera images
 for each new event and keeps a daily map summary at
 `/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` as new
 anomaly clusters are detected.
@@ -433,6 +441,7 @@ Useful panels/topics:
 - `/odom`
 - `/robot_pose_map`
 - `/anomaly/markers`
+- `/anomaly/detections_3d`
 - `/anomaly/events`
 - `/anomaly/debug_image/compressed`
 - `/anomaly/privacy_image/compressed`

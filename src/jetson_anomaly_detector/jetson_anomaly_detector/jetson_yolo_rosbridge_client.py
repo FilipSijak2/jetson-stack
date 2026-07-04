@@ -17,9 +17,14 @@ import numpy as np
 
 from .config import AppConfig, load_config
 from .event_schema import EventJsonlWriter, build_event, build_readable_event
-from .localization import estimate_depth_measurement, estimate_laser_distance_m, estimate_object_pose_map
+from .localization import (
+    estimate_3d_bounds_camera,
+    estimate_depth_measurement,
+    estimate_laser_distance_m,
+    estimate_object_pose_map,
+)
 from .map_snapshot import save_daily_map_summary
-from .marker_manager import MarkerManager
+from .marker_manager import MarkerManager, build_detection_3d_marker_array
 from .models import (
     AnomalyClusterSummary,
     CameraIntrinsics,
@@ -118,6 +123,7 @@ class JetsonYoloRosbridgeClient:
             text_z_offset_m=config.marker_text_z_offset_m,
             text_show_count=config.marker_text_show_count,
             ray_enabled=config.marker_ray_enabled,
+            ray_ttl_s=config.marker_ray_ttl_s,
             uncertainty_enabled=config.marker_uncertainty_enabled,
             uncertainty_sigma_scale=config.marker_uncertainty_sigma_scale,
             uncertainty_min_radius_m=config.marker_uncertainty_min_radius_m,
@@ -137,15 +143,18 @@ class JetsonYoloRosbridgeClient:
         self.daily_clusters: Dict[str, AnomalyClusterSummary] = {}
         self.frame_count = 0
         self.event_counter = 0
+        self.current_daily_key = _local_day_key()
         self._load_reported_anomalies()
         self.stop_requested = False
         self.next_marker_publish = 0.0
         self.next_daily_summary_refresh = 0.0
         self.next_debug_image_publish = 0.0
         self.next_privacy_image_publish = 0.0
+        self.next_detection_3d_publish = 0.0
         self.last_missing_pose_log = 0.0
         self.last_missing_map_log = 0.0
         self.last_missing_scan_log = 0.0
+        self.last_event_gate_log: Dict[str, float] = {}
 
     def run_forever(self) -> None:
         while not self.stop_requested:
@@ -195,6 +204,11 @@ class JetsonYoloRosbridgeClient:
         self.rosbridge.advertise(self.config.event_topic, "std_msgs/String")
         self.rosbridge.advertise(self.config.readable_event_topic, "std_msgs/String")
         self.rosbridge.advertise(self.config.marker_topic, "visualization_msgs/MarkerArray")
+        if self.config.detection_3d_enabled:
+            self.rosbridge.advertise(
+                self.config.detection_3d_topic,
+                "visualization_msgs/MarkerArray",
+            )
         self.rosbridge.advertise(self.config.debug_image_topic, "sensor_msgs/CompressedImage")
         if self.config.privacy_image_enabled:
             self.rosbridge.advertise(
@@ -217,11 +231,16 @@ class JetsonYoloRosbridgeClient:
             self.config.use_laser_distance,
         )
         LOGGER.info(
-            "Publishing events=%s readable_events=%s markers=%s debug_image=%s "
-            "privacy_image=%s map_snapshot=%s",
+            "Publishing events=%s readable_events=%s markers=%s detections_3d=%s "
+            "debug_image=%s privacy_image=%s map_snapshot=%s",
             self.config.event_topic,
             self.config.readable_event_topic,
             self.config.marker_topic,
+            (
+                self.config.detection_3d_topic
+                if self.config.detection_3d_enabled
+                else "disabled"
+            ),
             self.config.debug_image_topic,
             (
                 self.config.privacy_image_topic
@@ -304,7 +323,29 @@ class JetsonYoloRosbridgeClient:
                 intrinsics.height,
             )
 
+    def _rollover_daily_state_if_needed(self) -> None:
+        day = _local_day_key()
+        if day == self.current_daily_key:
+            return
+        previous_day = self.current_daily_key
+        self.current_daily_key = day
+        self.reported_anomalies.clear()
+        self.pending_anomalies.clear()
+        self.daily_clusters.clear()
+        self.last_event_clusters.clear()
+        self.last_event_gate_log.clear()
+        self.next_daily_summary_refresh = 0.0
+        self._clear_existing_markers()
+        self.markers.reset()
+        LOGGER.info(
+            "Daily anomaly state reset: %s -> %s. "
+            "De-duplication and daily map now start empty.",
+            previous_day,
+            day,
+        )
+
     def _on_camera_image(self, msg: Dict[str, Any]) -> None:
+        self._rollover_daily_state_if_needed()
         self.frame_count += 1
         if self.frame_count % self.config.inference_every_n_frames != 0:
             return
@@ -319,6 +360,7 @@ class JetsonYoloRosbridgeClient:
         anomalies = self._filter_anomalies(detections)
         self._publish_debug_stream_if_due(anomalies, frame, msg)
         self._publish_privacy_stream_if_due(anomalies, frame, msg)
+        self._publish_detection_3d_if_due(anomalies, frame, msg)
         if not anomalies:
             return
 
@@ -345,15 +387,17 @@ class JetsonYoloRosbridgeClient:
             )
             self.daily_clusters[cluster.cluster_id] = cluster
             if self._already_reported(confirmed_group.label, cluster.object_pose):
+                self._log_event_gate("already_reported_today", confirmed_group)
                 self._remember_reported(confirmed_group.label, cluster.object_pose)
                 self._refresh_daily_map_summary(msg)
                 continue
             if not self._cooldown_ready(confirmed_group.label, cluster.object_pose):
+                self._log_event_gate("cooldown", confirmed_group)
                 continue
             try:
                 self._create_anomaly_event(confirmed_group, cluster, frame, msg)
             except Exception as exc:
-                LOGGER.warning("Failed to create anomaly event: %s", exc)
+                LOGGER.exception("Failed to create anomaly event: %s", exc)
 
     def _filter_anomalies(self, detections: List[Detection]) -> List[Detection]:
         anomaly_labels = {label.strip() for label in self.config.anomaly_classes}
@@ -440,6 +484,26 @@ class JetsonYoloRosbridgeClient:
             for group in groups
         ]
 
+    def _log_event_gate(self, reason: str, group: DetectionGroup) -> None:
+        track_id = _best_track_id(group.detections)
+        key = f"{reason}:{group.label}:{track_id}"
+        now = time.monotonic()
+        if now - self.last_event_gate_log.get(key, 0.0) < 5.0:
+            return
+        self.last_event_gate_log[key] = now
+        detection = max(group.detections, key=lambda item: item.confidence)
+        LOGGER.info(
+            "Detection label=%s confidence=%.2f track_id=%s event_gate=%s "
+            "object_map=(%.2f, %.2f) distance_source=%s",
+            group.label,
+            detection.confidence,
+            track_id if track_id is not None else "-",
+            reason,
+            group.object_pose.x,
+            group.object_pose.y,
+            group.distance_estimate.source,
+        )
+
     def _group_center(self, group: List[LocatedDetection]) -> ObjectPoseMap:
         count = max(1, len(group))
         return ObjectPoseMap(
@@ -453,11 +517,9 @@ class JetsonYoloRosbridgeClient:
             return group
         pending = self._remember_pending_anomaly(group)
         if pending.observations < self.config.anomaly_min_observations:
-            LOGGER.debug(
-                "Pending anomaly label=%s observations=%d/%d",
-                group.label,
-                pending.observations,
-                self.config.anomaly_min_observations,
+            self._log_event_gate(
+                f"pending_{pending.observations}_of_{self.config.anomaly_min_observations}",
+                group,
             )
             return None
         return DetectionGroup(
@@ -586,16 +648,30 @@ class JetsonYoloRosbridgeClient:
                 continue
             try:
                 event = json.loads(line)
+                event_id = str(event.get("id") or "")
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                LOGGER.warning("Skipping invalid anomaly event log line: %s", exc)
+                continue
+
+            if event_id.startswith("anom_"):
+                try:
+                    max_event_counter = max(max_event_counter, int(event_id.rsplit("_", 1)[1]))
+                except (IndexError, ValueError):
+                    pass
+
+            if _event_local_day_key(event) != self.current_daily_key:
+                continue
+
+            try:
                 label = str(event.get("label") or "")
                 pose = event.get("object_pose_map") or {}
-                event_id = str(event.get("id") or "")
                 object_pose = ObjectPoseMap(
                     x=float(pose["x"]),
                     y=float(pose["y"]),
                     z=float(pose.get("z", 0.0)),
                 )
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                LOGGER.warning("Skipping invalid anomaly event log line: %s", exc)
+            except (KeyError, TypeError, ValueError) as exc:
+                LOGGER.warning("Skipping invalid current-day anomaly event: %s", exc)
                 continue
 
             if label:
@@ -604,15 +680,14 @@ class JetsonYoloRosbridgeClient:
                 if len(self.reported_anomalies) > before:
                     loaded += 1
 
-            if event_id.startswith("anom_"):
-                try:
-                    max_event_counter = max(max_event_counter, int(event_id.rsplit("_", 1)[1]))
-                except (IndexError, ValueError):
-                    pass
-
         self.event_counter = max_event_counter
-        if loaded:
-            LOGGER.info("Loaded %d remembered anomaly locations from %s", loaded, self.event_log_path)
+        LOGGER.info(
+            "Loaded %d remembered anomaly locations for %s from %s "
+            "(older days excluded from de-duplication)",
+            loaded,
+            self.current_daily_key,
+            self.event_log_path,
+        )
 
     def _create_anomaly_event(
         self,
@@ -632,18 +707,21 @@ class JetsonYoloRosbridgeClient:
         if robot_pose is None:
             return
 
-        self._remember_reported(group.label, cluster.object_pose)
-        snapshot_path: Optional[Path] = None
-        refreshed_summary = self._refresh_daily_map_summary(source_msg, force=True)
-        if refreshed_summary is not None:
-            snapshot_path, _snapshot_image = refreshed_summary
-
         if self.config.save_per_event_images:
             original_path = self.original_dir / f"{event_id}_{label_slug}.jpg"
             annotated_path = self.annotated_dir / f"{event_id}_{label_slug}.jpg"
             annotated = annotate_frame(frame.copy(), group.detections)
             _write_image(original_path, frame)
             _write_image(annotated_path, annotated)
+
+        snapshot_path: Optional[Path] = None
+        refreshed_summary = self._refresh_daily_map_summary(
+            source_msg,
+            force=True,
+            extra_reported=(group.label, cluster.object_pose),
+        )
+        if refreshed_summary is not None:
+            snapshot_path, _snapshot_image = refreshed_summary
 
         event = build_event(
             event_id=event_id,
@@ -663,16 +741,21 @@ class JetsonYoloRosbridgeClient:
             event_log=self.event_log_path,
         )
         self.event_writer.append(event)
+        self._remember_reported(group.label, cluster.object_pose)
         self._publish_event(event)
         self._publish_debug_image(annotate_frame(frame.copy(), group.detections), source_msg)
         self._mark_cooldown(group.label, cluster.object_pose)
         LOGGER.info(
-            "Anomaly %s label=%s confidence=%.2f cluster=%s count=%d",
+            "Anomaly %s label=%s confidence=%.2f cluster=%s count=%d "
+            "original=%s annotated=%s daily_map=%s",
             event_id,
             detection.label,
             detection.confidence,
             cluster.cluster_id,
             cluster.count,
+            original_path or "-",
+            annotated_path or "-",
+            snapshot_path or "-",
         )
 
     def _distance_for_detection(
@@ -835,11 +918,78 @@ class JetsonYoloRosbridgeClient:
         )
         self._publish_privacy_image(privacy_frame, source_msg)
 
-    def _daily_map_path(self) -> Path:
-        day = datetime.now().strftime("%Y-%m-%d")
-        return self.daily_map_dir / f"anomalies_{day}.png"
+    def _publish_detection_3d_if_due(
+        self,
+        detections: List[Detection],
+        frame: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> None:
+        if not self.config.detection_3d_enabled or not detections:
+            return
+        now = time.monotonic()
+        if now < self.next_detection_3d_publish:
+            return
+        self.next_detection_3d_publish = now + (
+            1.0 / self.config.detection_3d_publish_hz
+        )
+        intrinsics = self.camera_intrinsics
+        selected = self._select_depth_frame(source_msg)
+        if intrinsics is None or selected is None:
+            return
+        depth, _depth_age_s = selected
+        height, width = frame.shape[:2]
+        bounded = []
+        for detection in detections:
+            if self.config.detection_3d_require_mask and detection.mask is None:
+                continue
+            bounds = estimate_3d_bounds_camera(
+                depth_image=depth,
+                bbox_xyxy=detection.bbox_xyxy,
+                image_width=width,
+                image_height=height,
+                intrinsics=intrinsics,
+                object_mask=detection.mask,
+                min_distance_m=self.config.depth_min_distance_m,
+                max_distance_m=self.config.depth_max_distance_m,
+                min_valid_points=self.config.detection_3d_min_valid_points,
+                lower_percentile=self.config.detection_3d_lower_percentile,
+                upper_percentile=self.config.detection_3d_upper_percentile,
+                mask_erode_px=self.config.segmentation_depth_mask_erode_px,
+                sample_stride=self.config.detection_3d_sample_stride,
+                minimum_thickness_m=self.config.detection_3d_minimum_thickness_m,
+            )
+            if bounds is not None:
+                bounded.append((detection, bounds))
+        if not bounded:
+            return
 
-    def _reported_summaries(self) -> List[AnomalyClusterSummary]:
+        header = source_msg.get("header") or {}
+        frame_id = (
+            self.config.detection_3d_frame_id
+            or header.get("frame_id")
+            or "camera_color_optical_frame"
+        )
+        marker_array = build_detection_3d_marker_array(
+            bounded,
+            frame_id=str(frame_id),
+            stamp=header.get("stamp"),
+            ttl_s=self.config.detection_3d_ttl_s,
+            line_width_m=self.config.detection_3d_line_width_m,
+        )
+        self.rosbridge.publish(self.config.detection_3d_topic, marker_array)
+
+    def _daily_map_path(self) -> Path:
+        return self.daily_map_dir / f"anomalies_{self.current_daily_key}.png"
+
+    def _reported_summaries(
+        self,
+        extra_reported: Optional[tuple[str, ObjectPoseMap]] = None,
+    ) -> List[AnomalyClusterSummary]:
+        reported = list(self.reported_anomalies)
+        if extra_reported is not None:
+            label, pose = extra_reported
+            if self._reported_index(label, pose) is None:
+                reported.append(extra_reported)
         return [
             AnomalyClusterSummary(
                 cluster_id=f"reported_{index:05d}",
@@ -847,13 +997,14 @@ class JetsonYoloRosbridgeClient:
                 object_pose=pose,
                 count=1,
             )
-            for index, (label, pose) in enumerate(self.reported_anomalies, start=1)
+            for index, (label, pose) in enumerate(reported, start=1)
         ]
 
     def _refresh_daily_map_summary(
         self,
         source_msg: Dict[str, Any],
         force: bool = False,
+        extra_reported: Optional[tuple[str, ObjectPoseMap]] = None,
     ) -> Optional[tuple[Path, np.ndarray]]:
         if not self.config.daily_map_summary:
             return None
@@ -868,7 +1019,7 @@ class JetsonYoloRosbridgeClient:
             snapshot_path = self._daily_map_path()
             snapshot_image = save_daily_map_summary(
                 self.latest_map,
-                self._reported_summaries(),
+                self._reported_summaries(extra_reported),
                 snapshot_path,
             )
         except Exception as exc:
@@ -1116,6 +1267,23 @@ def _blend_pose(current: ObjectPoseMap, new_pose: ObjectPoseMap, new_weight: flo
 
 def _slug(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_") or "anomaly"
+
+
+def _local_day_key() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
+def _event_local_day_key(event: Dict[str, Any]) -> Optional[str]:
+    raw = str(event.get("timestamp") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone().date().isoformat()
+    except ValueError:
+        return None
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

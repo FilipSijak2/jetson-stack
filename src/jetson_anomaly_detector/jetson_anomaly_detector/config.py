@@ -61,6 +61,8 @@ class AppConfig:
     event_topic: str = "/anomaly/events"
     readable_event_topic: str = "/anomaly/events/readable"
     marker_topic: str = "/anomaly/markers"
+    detection_3d_topic: str = "/anomaly/detections_3d"
+    detection_3d_frame_id: str = ""
     debug_image_topic: str = "/anomaly/debug_image/compressed"
     privacy_image_topic: str = "/anomaly/privacy_image/compressed"
     map_snapshot_topic: str = "/anomaly/map_snapshot/compressed"
@@ -132,11 +134,22 @@ class AppConfig:
     privacy_draw_mask_overlay: bool = True
     privacy_mask_overlay_alpha: float = 0.25
     marker_ray_enabled: bool = True
+    marker_ray_ttl_s: float = 2.0
     marker_uncertainty_enabled: bool = True
     marker_uncertainty_sigma_scale: float = 2.0
     marker_uncertainty_min_radius_m: float = 0.05
     marker_uncertainty_max_radius_m: float = 1.0
     marker_aux_line_width_m: float = 0.025
+    detection_3d_enabled: bool = True
+    detection_3d_require_mask: bool = True
+    detection_3d_publish_hz: float = 5.0
+    detection_3d_ttl_s: float = 0.75
+    detection_3d_min_valid_points: int = 30
+    detection_3d_lower_percentile: float = 5.0
+    detection_3d_upper_percentile: float = 95.0
+    detection_3d_sample_stride: int = 2
+    detection_3d_minimum_thickness_m: float = 0.05
+    detection_3d_line_width_m: float = 0.01
     map_frame_id: str = "map"
 
     def __post_init__(self) -> None:
@@ -155,6 +168,8 @@ ENV_OVERRIDES = {
     "event_topic": ("EVENT_TOPIC", _env_str),
     "readable_event_topic": ("READABLE_EVENT_TOPIC", _env_str),
     "marker_topic": ("MARKER_TOPIC", _env_str),
+    "detection_3d_topic": ("DETECTION_3D_TOPIC", _env_str),
+    "detection_3d_frame_id": ("DETECTION_3D_FRAME_ID", _env_str),
     "debug_image_topic": ("DEBUG_IMAGE_TOPIC", _env_str),
     "privacy_image_topic": ("PRIVACY_IMAGE_TOPIC", _env_str),
     "map_snapshot_topic": ("MAP_SNAPSHOT_TOPIC", _env_str),
@@ -226,11 +241,22 @@ ENV_OVERRIDES = {
     "privacy_draw_mask_overlay": ("PRIVACY_DRAW_MASK_OVERLAY", _env_bool),
     "privacy_mask_overlay_alpha": ("PRIVACY_MASK_OVERLAY_ALPHA", _env_float),
     "marker_ray_enabled": ("MARKER_RAY_ENABLED", _env_bool),
+    "marker_ray_ttl_s": ("MARKER_RAY_TTL_S", _env_float),
     "marker_uncertainty_enabled": ("MARKER_UNCERTAINTY_ENABLED", _env_bool),
     "marker_uncertainty_sigma_scale": ("MARKER_UNCERTAINTY_SIGMA_SCALE", _env_float),
     "marker_uncertainty_min_radius_m": ("MARKER_UNCERTAINTY_MIN_RADIUS_M", _env_float),
     "marker_uncertainty_max_radius_m": ("MARKER_UNCERTAINTY_MAX_RADIUS_M", _env_float),
     "marker_aux_line_width_m": ("MARKER_AUX_LINE_WIDTH_M", _env_float),
+    "detection_3d_enabled": ("DETECTION_3D_ENABLED", _env_bool),
+    "detection_3d_require_mask": ("DETECTION_3D_REQUIRE_MASK", _env_bool),
+    "detection_3d_publish_hz": ("DETECTION_3D_PUBLISH_HZ", _env_float),
+    "detection_3d_ttl_s": ("DETECTION_3D_TTL_S", _env_float),
+    "detection_3d_min_valid_points": ("DETECTION_3D_MIN_VALID_POINTS", _env_int),
+    "detection_3d_lower_percentile": ("DETECTION_3D_LOWER_PERCENTILE", _env_float),
+    "detection_3d_upper_percentile": ("DETECTION_3D_UPPER_PERCENTILE", _env_float),
+    "detection_3d_sample_stride": ("DETECTION_3D_SAMPLE_STRIDE", _env_int),
+    "detection_3d_minimum_thickness_m": ("DETECTION_3D_MINIMUM_THICKNESS_M", _env_float),
+    "detection_3d_line_width_m": ("DETECTION_3D_LINE_WIDTH_M", _env_float),
     "map_frame_id": ("MAP_FRAME_ID", _env_str),
 }
 
@@ -282,6 +308,9 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["marker_uncertainty_sigma_scale"] = max(
         0.0, float(normalized.get("marker_uncertainty_sigma_scale", 2.0))
     )
+    normalized["marker_ray_ttl_s"] = max(
+        0.1, float(normalized.get("marker_ray_ttl_s", 2.0))
+    )
     normalized["marker_uncertainty_min_radius_m"] = max(
         0.0, float(normalized.get("marker_uncertainty_min_radius_m", 0.05))
     )
@@ -291,6 +320,30 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     )
     normalized["marker_aux_line_width_m"] = max(
         0.005, float(normalized.get("marker_aux_line_width_m", 0.025))
+    )
+    normalized["detection_3d_publish_hz"] = max(
+        0.1, float(normalized.get("detection_3d_publish_hz", 5.0))
+    )
+    normalized["detection_3d_ttl_s"] = max(
+        0.1, float(normalized.get("detection_3d_ttl_s", 0.75))
+    )
+    normalized["detection_3d_min_valid_points"] = max(
+        3, int(normalized.get("detection_3d_min_valid_points", 30))
+    )
+    normalized["detection_3d_lower_percentile"] = max(
+        0.0, min(49.0, float(normalized.get("detection_3d_lower_percentile", 5.0)))
+    )
+    normalized["detection_3d_upper_percentile"] = max(
+        51.0, min(100.0, float(normalized.get("detection_3d_upper_percentile", 95.0)))
+    )
+    normalized["detection_3d_sample_stride"] = max(
+        1, int(normalized.get("detection_3d_sample_stride", 2))
+    )
+    normalized["detection_3d_minimum_thickness_m"] = max(
+        0.01, float(normalized.get("detection_3d_minimum_thickness_m", 0.05))
+    )
+    normalized["detection_3d_line_width_m"] = max(
+        0.002, float(normalized.get("detection_3d_line_width_m", 0.01))
     )
     normalized["marker_republish_hz"] = max(0.1, float(normalized.get("marker_republish_hz", 1.0)))
     normalized["cluster_merge_radius_m"] = max(0.01, float(normalized.get("cluster_merge_radius_m", 1.00)))

@@ -1,15 +1,32 @@
+import json
 import logging
+import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
-from jetson_anomaly_detector.jetson_yolo_rosbridge_client import blur_except_detections
+from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
+    JetsonYoloRosbridgeClient,
+    _local_day_key,
+    blur_except_detections,
+)
 from jetson_anomaly_detector.event_schema import build_event
-from jetson_anomaly_detector.localization import estimate_depth_measurement
-from jetson_anomaly_detector.marker_manager import MARKER_LINE_STRIP, MarkerManager
+from jetson_anomaly_detector.localization import (
+    estimate_3d_bounds_camera,
+    estimate_depth_measurement,
+)
+from jetson_anomaly_detector.marker_manager import (
+    MARKER_LINE_LIST,
+    MARKER_LINE_STRIP,
+    MarkerManager,
+    build_detection_3d_marker_array,
+)
 from jetson_anomaly_detector.models import (
+    BoundingBox3D,
+    CameraIntrinsics,
     Detection,
     DistanceEstimate,
     ObjectPoseMap,
@@ -137,8 +154,49 @@ class TrackingAndSegmentationTest(unittest.TestCase):
         self.assertTrue(event["segmentation_mask_used"])
         self.assertNotIn("mask", event)
 
+    def test_deprojects_segmented_depth_to_3d_bounds(self) -> None:
+        depth = np.full((100, 100), 2.0, dtype=np.float32)
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[30:70, 40:60] = True
+        bounds = estimate_3d_bounds_camera(
+            depth_image=depth,
+            bbox_xyxy=[35, 25, 65, 75],
+            image_width=100,
+            image_height=100,
+            intrinsics=CameraIntrinsics(100.0, 100.0, 50.0, 50.0, 100, 100),
+            object_mask=mask,
+            min_distance_m=0.1,
+            max_distance_m=6.0,
+            min_valid_points=20,
+            mask_erode_px=0,
+            sample_stride=1,
+        )
+        self.assertIsNotNone(bounds)
+        assert bounds is not None
+        self.assertAlmostEqual(bounds.center_z, 2.0)
+        self.assertAlmostEqual(bounds.center_x, -0.01, places=2)
+        self.assertGreater(bounds.size_x, 0.3)
+        self.assertGreater(bounds.size_y, 0.6)
+
 
 class MarkerVisualizationTest(unittest.TestCase):
+    def test_builds_live_3d_wireframe_in_camera_frame(self) -> None:
+        detection = Detection("bottle", 0.91, [1, 2, 3, 4], track_id=8)
+        bounds = BoundingBox3D(0.1, -0.2, 1.5, 0.3, 0.6, 0.1, 120)
+        marker_array = build_detection_3d_marker_array(
+            [(detection, bounds)],
+            frame_id="realsense_color_optical_frame",
+            stamp={"sec": 1, "nanosec": 2},
+            ttl_s=0.75,
+            line_width_m=0.01,
+        )
+        markers = marker_array["markers"]
+        self.assertEqual(len(markers), 2)
+        self.assertEqual(markers[0]["type"], MARKER_LINE_LIST)
+        self.assertEqual(markers[0]["header"]["frame_id"], "realsense_color_optical_frame")
+        self.assertEqual(len(markers[0]["points"]), 24)
+        self.assertIn("#8", markers[1]["text"])
+
     def test_marker_array_contains_ray_uncertainty_and_track_id(self) -> None:
         manager = MarkerManager(
             ray_enabled=True,
@@ -179,6 +237,68 @@ class MarkerVisualizationTest(unittest.TestCase):
             uncertainty_m=0.2,
         )
         self.assertEqual(len(manager.build_marker_array()["markers"]), 2)
+
+    def test_observation_ray_stops_after_its_short_ttl(self) -> None:
+        manager = MarkerManager(
+            ray_enabled=True,
+            ray_ttl_s=2.0,
+            uncertainty_enabled=False,
+        )
+        manager.add_or_update(
+            label="bottle",
+            object_pose=ObjectPoseMap(1.0, 0.0),
+            observed_count=1,
+            ttl_s=180.0,
+            robot_pose=RobotPoseMap(0.0, 0.0, 0.0),
+        )
+        cluster = next(iter(manager.active.values()))
+        cluster.ray_expires_at = 0.0
+        markers = manager.build_marker_array()["markers"]
+        self.assertFalse(
+            any(
+                marker["type"] == MARKER_LINE_STRIP
+                and len(marker.get("points", [])) == 2
+                for marker in markers
+            )
+        )
+
+
+class DailyStateTest(unittest.TestCase):
+    def test_loads_only_current_day_for_dedup_but_keeps_global_counter(self) -> None:
+        now = datetime.now().astimezone()
+        today = now.isoformat()
+        yesterday = (now - timedelta(days=1)).isoformat()
+        events = [
+            {
+                "id": "anom_00041",
+                "timestamp": yesterday,
+                "label": "bottle",
+                "object_pose_map": {"x": 1.0, "y": 1.0, "z": 0.0},
+            },
+            {
+                "id": "anom_00042",
+                "timestamp": today,
+                "label": "bottle",
+                "object_pose_map": {"x": 4.0, "y": 4.0, "z": 0.0},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            event_log = Path(directory) / "events.jsonl"
+            event_log.write_text(
+                "\n".join(json.dumps(event) for event in events) + "\n",
+                encoding="utf-8",
+            )
+            client = JetsonYoloRosbridgeClient.__new__(JetsonYoloRosbridgeClient)
+            client.event_log_path = event_log
+            client.event_counter = 0
+            client.current_daily_key = _local_day_key()
+            client.reported_anomalies = []
+            client.config = SimpleNamespace(reported_merge_radius_m=2.0)
+            client._load_reported_anomalies()
+
+        self.assertEqual(client.event_counter, 42)
+        self.assertEqual(len(client.reported_anomalies), 1)
+        self.assertAlmostEqual(client.reported_anomalies[0][1].x, 4.0)
 
 
 if __name__ == "__main__":

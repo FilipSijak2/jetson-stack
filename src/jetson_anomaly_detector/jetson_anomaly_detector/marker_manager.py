@@ -3,9 +3,15 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .models import AnomalyClusterSummary, ObjectPoseMap, RobotPoseMap
+from .models import (
+    AnomalyClusterSummary,
+    BoundingBox3D,
+    Detection,
+    ObjectPoseMap,
+    RobotPoseMap,
+)
 from .ros_messages import ros_time_now
 
 
@@ -14,10 +20,102 @@ MARKER_DELETE = 2
 MARKER_DELETE_ALL = 3
 MARKER_CUBE = 1
 MARKER_LINE_STRIP = 4
+MARKER_LINE_LIST = 5
 MARKER_TEXT_VIEW_FACING = 9
 TEXT_MARKER_HEIGHT_M = 0.08
 TEXT_MARKER_Z_OFFSET_M = 0.18
 OBJECT_MARKER_SIZE_M = 0.20
+
+
+def build_detection_3d_marker_array(
+    detections: Sequence[Tuple[Detection, BoundingBox3D]],
+    frame_id: str,
+    stamp: Optional[Dict[str, int]],
+    ttl_s: float,
+    line_width_m: float,
+) -> Dict[str, Any]:
+    markers: List[Dict[str, Any]] = []
+    marker_stamp = stamp or ros_time_now()
+    lifetime = {
+        "sec": int(ttl_s),
+        "nanosec": int((ttl_s % 1.0) * 1_000_000_000),
+    }
+    for index, (detection, bounds) in enumerate(detections):
+        base_id = (
+            max(0, int(detection.track_id)) * 2
+            if detection.track_id is not None
+            else 1_000_000 + index * 2
+        )
+        corners = _bounding_box_corners(bounds)
+        edge_indices = (
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        )
+        points = [
+            {"x": corners[point][0], "y": corners[point][1], "z": corners[point][2]}
+            for edge in edge_indices
+            for point in edge
+        ]
+        common = {
+            "header": {"stamp": marker_stamp, "frame_id": frame_id},
+            "ns": "jetson_anomaly_detections_3d",
+            "action": MARKER_ADD,
+            "lifetime": lifetime,
+        }
+        markers.append(
+            {
+                **common,
+                "id": base_id,
+                "type": MARKER_LINE_LIST,
+                "pose": {
+                    "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                },
+                "scale": {"x": max(0.002, float(line_width_m)), "y": 0.0, "z": 0.0},
+                "color": {"r": 0.05, "g": 1.0, "b": 0.1, "a": 0.95},
+                "points": points,
+            }
+        )
+        track_text = (
+            f" #{detection.track_id}" if detection.track_id is not None else ""
+        )
+        markers.append(
+            {
+                **common,
+                "id": base_id + 1,
+                "type": MARKER_TEXT_VIEW_FACING,
+                "pose": {
+                    "position": {
+                        "x": bounds.center_x,
+                        "y": bounds.center_y - bounds.size_y * 0.6,
+                        "z": bounds.center_z,
+                    },
+                    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                },
+                "scale": {"x": 0.0, "y": 0.0, "z": 0.06},
+                "color": {"r": 0.1, "g": 1.0, "b": 0.1, "a": 1.0},
+                "text": (
+                    f"{detection.label}{track_text} {detection.confidence:.2f} "
+                    f"{bounds.center_z:.2f}m"
+                ),
+            }
+        )
+    return {"markers": markers}
+
+
+def _bounding_box_corners(bounds: BoundingBox3D) -> List[Tuple[float, float, float]]:
+    hx, hy, hz = bounds.size_x * 0.5, bounds.size_y * 0.5, bounds.size_z * 0.5
+    return [
+        (bounds.center_x - hx, bounds.center_y - hy, bounds.center_z - hz),
+        (bounds.center_x + hx, bounds.center_y - hy, bounds.center_z - hz),
+        (bounds.center_x + hx, bounds.center_y + hy, bounds.center_z - hz),
+        (bounds.center_x - hx, bounds.center_y + hy, bounds.center_z - hz),
+        (bounds.center_x - hx, bounds.center_y - hy, bounds.center_z + hz),
+        (bounds.center_x + hx, bounds.center_y - hy, bounds.center_z + hz),
+        (bounds.center_x + hx, bounds.center_y + hy, bounds.center_z + hz),
+        (bounds.center_x - hx, bounds.center_y + hy, bounds.center_z + hz),
+    ]
 
 
 @dataclass
@@ -32,6 +130,7 @@ class ActiveCluster:
     robot_pose: Optional[RobotPoseMap] = None
     uncertainty_m: Optional[float] = None
     track_id: Optional[int] = None
+    ray_expires_at: float = 0.0
 
 
 class MarkerManager:
@@ -45,6 +144,7 @@ class MarkerManager:
         text_z_offset_m: float = TEXT_MARKER_Z_OFFSET_M,
         text_show_count: bool = False,
         ray_enabled: bool = True,
+        ray_ttl_s: float = 2.0,
         uncertainty_enabled: bool = True,
         uncertainty_sigma_scale: float = 2.0,
         uncertainty_min_radius_m: float = 0.05,
@@ -62,6 +162,7 @@ class MarkerManager:
         self.text_z_offset_m = max(0.0, float(text_z_offset_m))
         self.text_show_count = bool(text_show_count)
         self.ray_enabled = bool(ray_enabled)
+        self.ray_ttl_s = max(0.1, float(ray_ttl_s))
         self.uncertainty_enabled = bool(uncertainty_enabled)
         self.uncertainty_sigma_scale = max(0.0, float(uncertainty_sigma_scale))
         self.uncertainty_min_radius_m = max(0.0, float(uncertainty_min_radius_m))
@@ -98,6 +199,7 @@ class MarkerManager:
                 robot_pose=robot_pose,
                 uncertainty_m=uncertainty_m,
                 track_id=track_id,
+                ray_expires_at=time.monotonic() + self.ray_ttl_s,
             )
             self.next_cluster_index += 1
             self.next_marker_base_id += self.marker_stride
@@ -112,6 +214,7 @@ class MarkerManager:
                 uncertainty_m if uncertainty_m is not None else cluster.uncertainty_m
             )
             cluster.track_id = track_id if track_id is not None else cluster.track_id
+            cluster.ray_expires_at = time.monotonic() + self.ray_ttl_s
 
         cluster = self._merge_overlapping_clusters(cluster)
         return self._summary(cluster)
@@ -120,10 +223,15 @@ class MarkerManager:
         self._expire_old_markers()
         markers = []
         stamp = ros_time_now()
+        now = time.monotonic()
         for cluster in self.active.values():
             markers.append(self._object_marker(cluster, stamp))
             markers.append(self._text_marker(cluster, stamp))
-            if self.ray_enabled and cluster.robot_pose is not None:
+            if (
+                self.ray_enabled
+                and cluster.robot_pose is not None
+                and cluster.ray_expires_at > now
+            ):
                 markers.append(self._ray_marker(cluster, stamp))
             if self.uncertainty_enabled and cluster.uncertainty_m is not None:
                 markers.append(self._uncertainty_marker(cluster, stamp))
@@ -135,6 +243,10 @@ class MarkerManager:
     def build_delete_all_marker_array(self) -> Dict[str, Any]:
         self.delete_queue.clear()
         return {"markers": [self._delete_all_marker(ros_time_now())]}
+
+    def reset(self) -> None:
+        self.active.clear()
+        self.delete_queue.clear()
 
     def summaries(self) -> List[AnomalyClusterSummary]:
         return [self._summary(cluster) for cluster in self.active.values()]
@@ -230,6 +342,10 @@ class MarkerManager:
     def _ray_marker(self, cluster: ActiveCluster, stamp: Dict[str, int]) -> Dict[str, Any]:
         msg = self._base(cluster, cluster.marker_base_id + 2, MARKER_LINE_STRIP, stamp)
         msg["pose"]["position"] = {"x": 0.0, "y": 0.0, "z": 0.0}
+        msg["lifetime"] = {
+            "sec": int(self.ray_ttl_s),
+            "nanosec": int((self.ray_ttl_s % 1.0) * 1_000_000_000),
+        }
         robot_pose = cluster.robot_pose
         assert robot_pose is not None
         msg.update(

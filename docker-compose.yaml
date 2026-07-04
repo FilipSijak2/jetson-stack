@@ -8,6 +8,8 @@ services:
     gpus: all
     env_file:
       - ./config/containers/jetson_anomaly.env
+    environment:
+      TZ: Europe/Zagreb
     volumes:
       - ./config:/workspace/config:ro
       - ./models:/workspace/models

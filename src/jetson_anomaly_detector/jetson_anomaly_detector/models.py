@@ -50,6 +50,17 @@ class ObjectPoseMap:
 
 
 @dataclass(frozen=True)
+class BoundingBox3D:
+    center_x: float
+    center_y: float
+    center_z: float
+    size_x: float
+    size_y: float
+    size_z: float
+    valid_point_count: int
+
+
+@dataclass(frozen=True)
 class AnomalyClusterSummary:
     cluster_id: str
     label: str
