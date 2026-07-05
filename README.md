@@ -391,9 +391,20 @@ Jetson writes:
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`
+- reviews: `/home/jetson/anomaly_logs/event_reviews.jsonl`
+- performance samples: `/home/jetson/anomaly_logs/evaluation/performance.jsonl`
+- latest evaluation report:
+  `/home/jetson/anomaly_logs/evaluation/latest/report.html`
 
 The Compose file mounts this directory to `./anomaly_logs` on the Jetson repo
 checkout for easy inspection.
+
+Quick FP review and report:
+
+```bash
+python3 scripts/mark_last_event_fp.py --date yesterday
+python3 scripts/generate_cv_report.py
+```
 
 Runtime stdout/stderr from `jetson_yolo_rosbridge_client` is also appended to:
 

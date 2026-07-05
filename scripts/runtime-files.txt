@@ -13,4 +13,8 @@ config/containers/jetson_anomaly.env
 scripts/pull-unprotected.sh
 scripts/protected-files.txt
 scripts/runtime-files.txt
+scripts/evaluation_common.py
+scripts/mark_event.py
+scripts/mark_last_event_fp.py
+scripts/generate_cv_report.py
 

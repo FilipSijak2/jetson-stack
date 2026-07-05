@@ -112,6 +112,16 @@ inspection_request_timeout_s: 70.0
 inspection_jpeg_quality: 95
 inspection_once_per_cluster: true
 inspection_retry_cooldown_s: 60.0
+inspection_group_enabled: true
+inspection_group_radius_m: 2.0
+inspection_group_collection_s: 0.75
+inspection_group_min_objects: 2
+inspection_group_max_objects: 10
+inspection_group_fov_margin_ratio: 1.25
+inspection_group_max_standoff_m: 2.50
+inspection_group_require_all_visible: true
+evaluation_metrics_enabled: true
+evaluation_metrics_sample_period_s: 1.0
 marker_ray_enabled: true
 marker_ray_ttl_s: 2.0
 marker_uncertainty_enabled: true

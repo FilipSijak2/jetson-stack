@@ -86,6 +86,20 @@ class ReportedAnomaly:
     track_id: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class InspectionTarget:
+    cluster_id: str
+    label: str
+    object_pose: ObjectPoseMap
+    track_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class InspectionCandidate:
+    group: DetectionGroup
+    cluster: AnomalyClusterSummary
+
+
 @dataclass
 class InspectionCaptureState:
     request_id: str
@@ -93,6 +107,8 @@ class InspectionCaptureState:
     label: str
     object_pose: ObjectPoseMap
     track_id: Optional[int]
+    targets: List[InspectionTarget]
+    require_all_visible: bool
     target_frames: int
     deadline: float
     frames_seen: int = 0
@@ -110,13 +126,17 @@ class JetsonYoloRosbridgeClient:
         self.map_dir = self.artifact_root / "map_images"
         self.daily_map_dir = self.map_dir / "daily"
         self.inspection_dir = self.artifact_root / "images" / "inspection"
+        self.evaluation_dir = self.artifact_root / "evaluation"
         self.event_log_path = self.artifact_root / "events.jsonl"
         self.inspection_log_path = self.artifact_root / "inspections.jsonl"
+        self.performance_log_path = self.evaluation_dir / "performance.jsonl"
         paths = [self.map_dir, self.daily_map_dir]
         if config.save_per_event_images:
             paths.extend([self.original_dir, self.annotated_dir])
         if config.inspection_enabled:
             paths.append(self.inspection_dir)
+        if config.evaluation_metrics_enabled:
+            paths.append(self.evaluation_dir)
         for path in paths:
             path.mkdir(parents=True, exist_ok=True)
 
@@ -188,6 +208,13 @@ class JetsonYoloRosbridgeClient:
         self.inspection_capture: Optional[InspectionCaptureState] = None
         self.inspection_retry_after: Dict[str, float] = {}
         self.inspected_locations: List[ReportedAnomaly] = []
+        self.inspection_candidate_buffer: Dict[
+            str, tuple[InspectionCandidate, float]
+        ] = {}
+        self.inspection_collection_deadline = 0.0
+        self.next_evaluation_metrics_sample = 0.0
+        self.last_evaluation_frame_time: Optional[float] = None
+        self.last_evaluation_error_log = 0.0
         self._load_inspected_locations()
 
     def run_forever(self) -> None:
@@ -391,63 +418,91 @@ class JetsonYoloRosbridgeClient:
 
     def _maybe_request_inspection(
         self,
-        group: DetectionGroup,
-        cluster: AnomalyClusterSummary,
+        candidates: List[InspectionCandidate],
     ) -> None:
         if not self.config.inspection_enabled:
             return
         if self.inspection_pending or self.inspection_capture is not None:
             return
-
-        estimate = group.distance_estimate
-        if (
-            estimate.distance_m < self.config.inspection_min_distance_m
-            or estimate.distance_m > self.config.inspection_max_distance_m
-        ):
+        candidates = self._collect_inspection_candidates(candidates)
+        if not candidates:
             return
-        if (
-            self.config.inspection_require_metric_distance
-            and estimate.source not in {"depth", "laser"}
-        ):
-            self._log_event_gate("inspection_requires_depth_or_laser", group)
-            return
-        if (
-            estimate.uncertainty_m is None
-            or estimate.uncertainty_m > self.config.inspection_max_uncertainty_m
-        ):
-            self._log_event_gate("inspection_uncertainty_too_high", group)
+        eligible = [
+            candidate
+            for candidate in candidates
+            if self._inspection_candidate_is_eligible(candidate.group)
+        ]
+        if not eligible:
             return
 
-        track_id = _best_track_id(group.detections)
+        grouped = _group_inspection_candidates(
+            eligible,
+            (
+                self.config.inspection_group_radius_m
+                if self.config.inspection_group_enabled
+                else 0.0
+            ),
+        )
+        grouped.sort(key=len, reverse=True)
+        selected = grouped[0]
         if (
-            self.config.inspection_once_per_cluster
-            and self._inspection_already_completed(
-                group.label, group.object_pose, track_id
-            )
+            len(selected) < self.config.inspection_group_min_objects
+            or not self.config.inspection_group_enabled
         ):
-            return
-        retry_key = self._inspection_location_key(group.label, group.object_pose)
-        if time.monotonic() < self.inspection_retry_after.get(retry_key, 0.0):
-            return
+            selected = [selected[0]]
+        selected = selected[: self.config.inspection_group_max_objects]
 
         robot_pose = self.latest_pose
         if robot_pose is None:
             return
+        targets = [
+            InspectionTarget(
+                cluster_id=candidate.cluster.cluster_id,
+                label=candidate.group.label,
+                object_pose=candidate.group.object_pose,
+                track_id=_best_track_id(candidate.group.detections),
+            )
+            for candidate in selected
+        ]
+        center = _target_center(targets)
+        standoff_m = self._inspection_standoff_for_targets(
+            targets, center
+        )
+        retry_keys = [
+            self._inspection_location_key(target.label, target.object_pose)
+            for target in targets
+        ]
+        estimates = [candidate.group.distance_estimate for candidate in selected]
+        uncertainty_values = [
+            value.uncertainty_m
+            for value in estimates
+            if value.uncertainty_m is not None
+        ]
+        center_distance = float(
+            np.hypot(center.x - robot_pose.x, center.y - robot_pose.y)
+        )
         self.inspection_sequence += 1
         request_id = (
             f"inspect_{self.current_daily_key.replace('-', '')}_"
             f"{self.inspection_sequence:05d}"
         )
+        cluster_id = (
+            targets[0].cluster_id
+            if len(targets) == 1
+            else f"group_{self.inspection_sequence:05d}"
+        )
         request = {
             "request_id": request_id,
-            "cluster_id": cluster.cluster_id,
+            "cluster_id": cluster_id,
             "timestamp": datetime.now().astimezone().isoformat(),
-            "label": group.label,
-            "track_id": track_id,
+            "label": targets[0].label,
+            "track_id": targets[0].track_id if len(targets) == 1 else None,
+            "target_count": len(targets),
+            "targets": [_inspection_target_dict(target) for target in targets],
             "object_pose_map": {
-                "x": group.object_pose.x,
-                "y": group.object_pose.y,
-                "z": group.object_pose.z,
+                "x": center.x,
+                "y": center.y,
+                "z": center.z,
             },
             "robot_pose_map": {
                 "x": robot_pose.x,
@@ -455,17 +510,19 @@ class JetsonYoloRosbridgeClient:
                 "yaw": robot_pose.yaw,
             },
             "localization": {
-                "distance_m": estimate.distance_m,
-                "distance_source": estimate.source,
-                "distance_uncertainty_m": estimate.uncertainty_m,
+                "distance_m": center_distance,
+                "distance_source": estimates[0].source,
+                "distance_sources": sorted({value.source for value in estimates}),
+                "distance_uncertainty_m": max(uncertainty_values),
             },
-            "standoff_m": self.config.inspection_standoff_m,
+            "standoff_m": standoff_m,
         }
         self.inspection_pending[request_id] = {
             "request": request,
-            "object_pose": group.object_pose,
-            "track_id": track_id,
-            "retry_key": retry_key,
+            "object_pose": center,
+            "track_id": request["track_id"],
+            "targets": targets,
+            "retry_keys": retry_keys,
             "deadline": time.monotonic()
             + self.config.inspection_request_timeout_s,
         }
@@ -474,15 +531,96 @@ class JetsonYoloRosbridgeClient:
             {"data": json.dumps(request, separators=(",", ":"))},
         )
         LOGGER.info(
-            "Inspection %s requested for %s track_id=%s at map=(%.2f, %.2f) "
-            "distance=%.2fm source=%s",
+            "Inspection %s requested targets=%d tracks=%s center=(%.2f, %.2f) "
+            "distance=%.2fm standoff=%.2fm",
             request_id,
-            group.label,
-            track_id if track_id is not None else "-",
-            group.object_pose.x,
-            group.object_pose.y,
-            estimate.distance_m,
-            estimate.source,
+            len(targets),
+            [target.track_id for target in targets],
+            center.x,
+            center.y,
+            center_distance,
+            standoff_m,
+        )
+
+    def _collect_inspection_candidates(
+        self,
+        candidates: List[InspectionCandidate],
+    ) -> List[InspectionCandidate]:
+        if not self.config.inspection_group_enabled:
+            return candidates
+        now = time.monotonic()
+        for candidate in candidates:
+            self.inspection_candidate_buffer[
+                candidate.cluster.cluster_id
+            ] = (candidate, now)
+        collection_s = self.config.inspection_group_collection_s
+        if self.inspection_collection_deadline <= 0.0:
+            self.inspection_collection_deadline = now + collection_s
+        if now < self.inspection_collection_deadline:
+            return []
+        max_age = max(0.25, collection_s * 2.0)
+        collected = [
+            candidate
+            for candidate, last_seen in self.inspection_candidate_buffer.values()
+            if now - last_seen <= max_age
+        ]
+        self.inspection_candidate_buffer.clear()
+        self.inspection_collection_deadline = 0.0
+        return collected
+
+    def _inspection_candidate_is_eligible(
+        self, group: DetectionGroup
+    ) -> bool:
+        estimate = group.distance_estimate
+        if (
+            estimate.distance_m < self.config.inspection_min_distance_m
+            or estimate.distance_m > self.config.inspection_max_distance_m
+        ):
+            return False
+        if (
+            self.config.inspection_require_metric_distance
+            and estimate.source not in {"depth", "laser"}
+        ):
+            self._log_event_gate("inspection_requires_depth_or_laser", group)
+            return False
+        if (
+            estimate.uncertainty_m is None
+            or estimate.uncertainty_m > self.config.inspection_max_uncertainty_m
+        ):
+            self._log_event_gate("inspection_uncertainty_too_high", group)
+            return False
+        track_id = _best_track_id(group.detections)
+        if (
+            self.config.inspection_once_per_cluster
+            and self._inspection_already_completed(
+                group.label, group.object_pose, track_id
+            )
+        ):
+            return False
+        retry_key = self._inspection_location_key(group.label, group.object_pose)
+        return time.monotonic() >= self.inspection_retry_after.get(
+            retry_key, 0.0
+        )
+
+    def _inspection_standoff_for_targets(
+        self,
+        targets: List[InspectionTarget],
+        center: ObjectPoseMap,
+    ) -> float:
+        if len(targets) < self.config.inspection_group_min_objects:
+            return self.config.inspection_standoff_m
+        group_radius = max(
+            _distance_xy(target.object_pose, center) for target in targets
+        )
+        half_fov_rad = np.deg2rad(self.config.camera_horizontal_fov_deg * 0.5)
+        required = (
+            group_radius
+            / max(0.05, float(np.tan(half_fov_rad)))
+            * self.config.inspection_group_fov_margin_ratio
+        )
+        return min(
+            self.config.inspection_group_max_standoff_m,
+            max(self.config.inspection_standoff_m, required),
         )
 
     def _on_inspection_status(self, msg: Dict[str, Any]) -> None:
@@ -515,6 +653,11 @@ class JetsonYoloRosbridgeClient:
                 label=str(request["label"]),
                 object_pose=metadata["object_pose"],
                 track_id=metadata["track_id"],
+                targets=list(metadata["targets"]),
+                require_all_visible=(
+                    self.config.inspection_group_require_all_visible
+                    and len(metadata["targets"]) > 1
+                ),
                 target_frames=self.config.inspection_capture_frames,
                 deadline=time.monotonic()
                 + self.config.inspection_capture_timeout_s,
@@ -522,9 +665,7 @@ class JetsonYoloRosbridgeClient:
             return
 
         if state in {"rejected", "failed", "canceled", "timeout", "capture_failed"}:
-            self.inspection_retry_after[metadata["retry_key"]] = (
-                time.monotonic() + self.config.inspection_retry_cooldown_s
-            )
+            self._defer_inspection_retry(metadata)
             self.inspection_pending.pop(request_id, None)
             if (
                 self.inspection_capture is not None
@@ -541,14 +682,24 @@ class JetsonYoloRosbridgeClient:
         for request_id, metadata in list(self.inspection_pending.items()):
             if now < float(metadata.get("deadline", now + 1.0)):
                 continue
-            self.inspection_retry_after[metadata["retry_key"]] = (
-                now + self.config.inspection_retry_cooldown_s
-            )
+            self._defer_inspection_retry(metadata, now)
             self.inspection_pending.pop(request_id, None)
             LOGGER.warning(
                 "Inspection %s expired without a terminal coordinator status",
                 request_id,
             )
+
+    def _defer_inspection_retry(
+        self,
+        metadata: Dict[str, Any],
+        now: Optional[float] = None,
+    ) -> None:
+        retry_at = (
+            (time.monotonic() if now is None else now)
+            + self.config.inspection_retry_cooldown_s
+        )
+        for retry_key in metadata.get("retry_keys", []):
+            self.inspection_retry_after[str(retry_key)] = retry_at
 
     def _capture_inspection_frame_if_active(
         self,
@@ -563,14 +714,14 @@ class JetsonYoloRosbridgeClient:
             self._finish_inspection_capture(False, "capture_timeout")
             return
 
-        detection = self._select_inspection_detection(
+        selected = self._select_inspection_detections(
             capture, detections, frame.shape[1], frame.shape[0], source_msg
         )
-        if detection is None:
+        if not selected:
             return
         privacy_frame = blur_except_detections(
             frame,
-            [detection],
+            selected,
             kernel_size=self.config.privacy_blur_kernel_size,
             padding_ratio=self.config.privacy_bbox_padding_ratio,
             use_segmentation_masks=self.config.privacy_use_segmentation_masks,
@@ -578,7 +729,14 @@ class JetsonYoloRosbridgeClient:
             draw_mask_overlay=self.config.privacy_draw_mask_overlay,
             mask_overlay_alpha=self.config.privacy_mask_overlay_alpha,
         )
-        score = _detection_sharpness(frame, detection)
+        score = float(
+            np.mean(
+                [
+                    _detection_sharpness(frame, detection)
+                    for detection in selected
+                ]
+            )
+        )
         capture.frames_seen += 1
         if score > capture.best_score:
             capture.best_score = score
@@ -587,39 +745,71 @@ class JetsonYoloRosbridgeClient:
         if capture.frames_seen >= capture.target_frames:
             self._finish_inspection_capture(True, "best_frame_selected")
 
-    def _select_inspection_detection(
+    def _select_inspection_detections(
         self,
         capture: InspectionCaptureState,
         detections: List[Detection],
         image_width: int,
         image_height: int,
         source_msg: Dict[str, Any],
-    ) -> Optional[Detection]:
-        candidates = [item for item in detections if item.label == capture.label]
-        if capture.track_id is not None:
+    ) -> List[Detection]:
+        available = [
+            item
+            for item in detections
+            if any(item.label == target.label for target in capture.targets)
+        ]
+        selected: List[Detection] = []
+        unresolved: List[InspectionTarget] = []
+        for target in capture.targets:
             tracked = [
-                item for item in candidates if item.track_id == capture.track_id
+                item
+                for item in available
+                if target.track_id is not None
+                and item.track_id == target.track_id
+                and item.label == target.label
             ]
             if tracked:
-                return max(tracked, key=lambda item: item.confidence)
+                best = max(tracked, key=lambda item: item.confidence)
+                selected.append(best)
+                available.remove(best)
+            else:
+                unresolved.append(target)
 
-        nearest: Optional[Detection] = None
-        nearest_distance = float("inf")
-        for candidate in candidates:
-            try:
-                located = self._locate_detection(
-                    candidate, image_width, image_height, source_msg
+        located_cache: Dict[int, LocatedDetection] = {}
+        for target in unresolved:
+            nearest: Optional[Detection] = None
+            nearest_distance = float("inf")
+            for candidate in available:
+                if candidate.label != target.label:
+                    continue
+                try:
+                    located = located_cache.get(id(candidate))
+                    if located is None:
+                        located = self._locate_detection(
+                            candidate,
+                            image_width,
+                            image_height,
+                            source_msg,
+                        )
+                        located_cache[id(candidate)] = located
+                except Exception:
+                    continue
+                distance = _distance_xy(
+                    located.object_pose, target.object_pose
                 )
-            except Exception:
-                continue
-            distance = _distance_xy(located.object_pose, capture.object_pose)
-            if (
-                distance <= self.config.marker_association_radius_m
-                and distance < nearest_distance
-            ):
-                nearest = candidate
-                nearest_distance = distance
-        return nearest
+                if (
+                    distance <= self.config.marker_association_radius_m
+                    and distance < nearest_distance
+                ):
+                    nearest = candidate
+                    nearest_distance = distance
+            if nearest is not None:
+                selected.append(nearest)
+                available.remove(nearest)
+
+        if capture.require_all_visible and len(selected) != len(capture.targets):
+            return []
+        return selected
 
     def _finish_inspection_capture(self, success: bool, reason: str) -> None:
         capture = self.inspection_capture
@@ -643,10 +833,14 @@ class JetsonYoloRosbridgeClient:
                     capture.best_image,
                     capture.best_source_msg or {},
                 )
-                inspected = ReportedAnomaly(
-                    capture.label, capture.object_pose, capture.track_id
+                self.inspected_locations.extend(
+                    ReportedAnomaly(
+                        target.label,
+                        target.object_pose,
+                        target.track_id,
+                    )
+                    for target in capture.targets
                 )
-                self.inspected_locations.append(inspected)
             except Exception as exc:
                 LOGGER.exception(
                     "Inspection %s privacy image save failed: %s",
@@ -667,6 +861,10 @@ class JetsonYoloRosbridgeClient:
             "reason": reason,
             "label": capture.label,
             "track_id": capture.track_id,
+            "target_count": len(capture.targets),
+            "targets": [
+                _inspection_target_dict(target) for target in capture.targets
+            ],
             "object_pose_map": {
                 "x": capture.object_pose.x,
                 "y": capture.object_pose.y,
@@ -697,9 +895,7 @@ class JetsonYoloRosbridgeClient:
             image_path or "-",
         )
         if not success and metadata is not None:
-            self.inspection_retry_after[metadata["retry_key"]] = (
-                time.monotonic() + self.config.inspection_retry_cooldown_s
-            )
+            self._defer_inspection_retry(metadata)
         self.inspection_capture = None
 
     def _publish_inspection_privacy_image(
@@ -774,19 +970,27 @@ class JetsonYoloRosbridgeClient:
                     or _event_local_day_key(result) != self.current_daily_key
                 ):
                     continue
-                pose = result["object_pose_map"]
-                track_id = result.get("track_id")
-                self.inspected_locations.append(
-                    ReportedAnomaly(
-                        str(result["label"]),
-                        ObjectPoseMap(
-                            float(pose["x"]),
-                            float(pose["y"]),
-                            float(pose.get("z", 0.0)),
-                        ),
-                        int(track_id) if track_id is not None else None,
+                stored_targets = result.get("targets") or [
+                    {
+                        "label": result["label"],
+                        "track_id": result.get("track_id"),
+                        "object_pose_map": result["object_pose_map"],
+                    }
+                ]
+                for target in stored_targets:
+                    pose = target["object_pose_map"]
+                    track_id = target.get("track_id")
+                    self.inspected_locations.append(
+                        ReportedAnomaly(
+                            str(target["label"]),
+                            ObjectPoseMap(
+                                float(pose["x"]),
+                                float(pose["y"]),
+                                float(pose.get("z", 0.0)),
+                            ),
+                            int(track_id) if track_id is not None else None,
+                        )
                     )
-                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
 
@@ -803,6 +1007,8 @@ class JetsonYoloRosbridgeClient:
         self.last_event_gate_log.clear()
         self.inspected_locations.clear()
         self.inspection_retry_after.clear()
+        self.inspection_candidate_buffer.clear()
+        self.inspection_collection_deadline = 0.0
         self.next_daily_summary_refresh = 0.0
         self._clear_existing_markers()
         self.markers.reset()
@@ -818,6 +1024,13 @@ class JetsonYoloRosbridgeClient:
         self.frame_count += 1
         if self.frame_count % self.config.inference_every_n_frames != 0:
             return
+        frame_started = time.perf_counter()
+        camera_fps: Optional[float] = None
+        if self.last_evaluation_frame_time is not None:
+            interval = frame_started - self.last_evaluation_frame_time
+            if interval > 0.0:
+                camera_fps = 1.0 / interval
+        self.last_evaluation_frame_time = frame_started
 
         try:
             frame = decode_compressed_image(msg)
@@ -825,8 +1038,20 @@ class JetsonYoloRosbridgeClient:
             LOGGER.warning("Failed to decode compressed camera image: %s", exc)
             return
 
+        decode_finished = time.perf_counter()
+        inference_started = decode_finished
         detections = self.detector.detect(frame)
+        inference_finished = time.perf_counter()
         anomalies = self._filter_anomalies(detections)
+        self._record_evaluation_metrics(
+            frame=frame,
+            detections=detections,
+            anomalies=anomalies,
+            camera_fps=camera_fps,
+            decode_ms=(decode_finished - frame_started) * 1000.0,
+            inference_ms=(inference_finished - inference_started) * 1000.0,
+            detection_stage_ms=(inference_finished - frame_started) * 1000.0,
+        )
         self._expire_stale_inspection_request()
         self._capture_inspection_frame_if_active(anomalies, frame, msg)
         self._publish_debug_stream_if_due(anomalies, frame, msg)
@@ -843,6 +1068,7 @@ class JetsonYoloRosbridgeClient:
             self._locate_detection(detection, frame.shape[1], frame.shape[0], msg)
             for detection in anomalies
         ]
+        inspection_candidates: List[InspectionCandidate] = []
         for group in self._group_located_detections(located):
             confirmed_group = self._confirm_detection_group(group)
             if confirmed_group is None:
@@ -857,7 +1083,9 @@ class JetsonYoloRosbridgeClient:
                 track_id=_best_track_id(confirmed_group.detections),
             )
             self.daily_clusters[cluster.cluster_id] = cluster
-            self._maybe_request_inspection(confirmed_group, cluster)
+            inspection_candidates.append(
+                InspectionCandidate(confirmed_group, cluster)
+            )
             track_id = _best_track_id(confirmed_group.detections)
             if self._already_reported(
                 confirmed_group.label, cluster.object_pose, track_id
@@ -875,6 +1103,57 @@ class JetsonYoloRosbridgeClient:
                 self._create_anomaly_event(confirmed_group, cluster, frame, msg)
             except Exception as exc:
                 LOGGER.exception("Failed to create anomaly event: %s", exc)
+        self._maybe_request_inspection(inspection_candidates)
+
+    def _record_evaluation_metrics(
+        self,
+        *,
+        frame: np.ndarray,
+        detections: List[Detection],
+        anomalies: List[Detection],
+        camera_fps: Optional[float],
+        decode_ms: float,
+        inference_ms: float,
+        detection_stage_ms: float,
+    ) -> None:
+        if not self.config.evaluation_metrics_enabled:
+            return
+        now = time.monotonic()
+        if now < self.next_evaluation_metrics_sample:
+            return
+        self.next_evaluation_metrics_sample = (
+            now + self.config.evaluation_metrics_sample_period_s
+        )
+        record = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "frame_count": self.frame_count,
+            "image_width": int(frame.shape[1]),
+            "image_height": int(frame.shape[0]),
+            "camera_fps": round(camera_fps, 3) if camera_fps is not None else None,
+            "decode_ms": round(float(decode_ms), 3),
+            "inference_ms": round(float(inference_ms), 3),
+            "detection_stage_ms": round(float(detection_stage_ms), 3),
+            "detections": len(detections),
+            "anomalies": len(anomalies),
+            "tracked_detections": sum(
+                detection.track_id is not None for detection in detections
+            ),
+            "segmented_detections": sum(
+                detection.mask is not None for detection in detections
+            ),
+        }
+        try:
+            self.performance_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.performance_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as exc:
+            if now - self.last_evaluation_error_log >= 30.0:
+                self.last_evaluation_error_log = now
+                LOGGER.warning(
+                    "Could not append evaluation metrics to %s: %s",
+                    self.performance_log_path,
+                    exc,
+                )
 
     def _filter_anomalies(self, detections: List[Detection]) -> List[Detection]:
         anomaly_labels = {label.strip() for label in self.config.anomaly_classes}
@@ -1822,6 +2101,58 @@ def _write_image(
 
 def _distance_xy(first: ObjectPoseMap, second: ObjectPoseMap) -> float:
     return float(np.hypot(first.x - second.x, first.y - second.y))
+
+
+def _group_inspection_candidates(
+    candidates: List[InspectionCandidate],
+    radius_m: float,
+) -> List[List[InspectionCandidate]]:
+    if radius_m <= 0.0:
+        return [[candidate] for candidate in candidates]
+    groups: List[List[InspectionCandidate]] = []
+    for candidate in candidates:
+        target_group = next(
+            (
+                group
+                for group in groups
+                if all(
+                    _distance_xy(
+                        candidate.group.object_pose,
+                        member.group.object_pose,
+                    )
+                    <= radius_m
+                    for member in group
+                )
+            ),
+            None,
+        )
+        if target_group is None:
+            groups.append([candidate])
+        else:
+            target_group.append(candidate)
+    return groups
+
+
+def _target_center(targets: List[InspectionTarget]) -> ObjectPoseMap:
+    count = max(1, len(targets))
+    return ObjectPoseMap(
+        x=sum(target.object_pose.x for target in targets) / count,
+        y=sum(target.object_pose.y for target in targets) / count,
+        z=sum(target.object_pose.z for target in targets) / count,
+    )
+
+
+def _inspection_target_dict(target: InspectionTarget) -> Dict[str, Any]:
+    return {
+        "cluster_id": target.cluster_id,
+        "label": target.label,
+        "track_id": target.track_id,
+        "object_pose_map": {
+            "x": target.object_pose.x,
+            "y": target.object_pose.y,
+            "z": target.object_pose.z,
+        },
+    }
 
 
 def _blend_pose(current: ObjectPoseMap, new_pose: ObjectPoseMap, new_weight: float) -> ObjectPoseMap:

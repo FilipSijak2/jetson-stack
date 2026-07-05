@@ -9,9 +9,15 @@ from types import SimpleNamespace
 import numpy as np
 
 from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
+    DetectionGroup,
+    InspectionCandidate,
+    InspectionCaptureState,
+    InspectionTarget,
     JetsonYoloRosbridgeClient,
     _detection_sharpness,
+    _group_inspection_candidates,
     _local_day_key,
+    _target_center,
     blur_except_detections,
 )
 from jetson_anomaly_detector.event_schema import build_event
@@ -312,6 +318,124 @@ class InspectionCaptureTest(unittest.TestCase):
             _detection_sharpness(sharp, detection),
             _detection_sharpness(blurred, detection),
         )
+
+    def test_groups_nearby_bottles_into_one_inspection(self) -> None:
+        def candidate(cluster_id, x, y, track_id):
+            detection = Detection("bottle", 0.9, [0, 0, 20, 40], track_id)
+            group = DetectionGroup(
+                "bottle",
+                [detection],
+                ObjectPoseMap(x, y),
+                DistanceEstimate(1.5, "depth", 0.05),
+                "camera_intrinsics",
+            )
+            return InspectionCandidate(
+                group,
+                SimpleNamespace(cluster_id=cluster_id),
+            )
+
+        first = candidate("c1", 1.0, 0.0, 1)
+        second = candidate("c2", 2.5, 0.0, 2)
+        far = candidate("c3", 5.0, 0.0, 3)
+        groups = _group_inspection_candidates([first, second, far], 2.0)
+        self.assertEqual(sorted(len(group) for group in groups), [1, 2])
+
+    def test_group_standoff_expands_to_fit_all_targets(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(JetsonYoloRosbridgeClient)
+        client.config = SimpleNamespace(
+            inspection_group_min_objects=2,
+            inspection_standoff_m=0.70,
+            camera_horizontal_fov_deg=69.0,
+            inspection_group_fov_margin_ratio=1.25,
+            inspection_group_max_standoff_m=2.50,
+        )
+        targets = [
+            InspectionTarget("c1", "bottle", ObjectPoseMap(2.0, -0.5), 1),
+            InspectionTarget("c2", "bottle", ObjectPoseMap(2.0, 0.5), 2),
+        ]
+        center = _target_center(targets)
+        standoff = client._inspection_standoff_for_targets(targets, center)
+        self.assertGreater(standoff, 0.70)
+        self.assertLessEqual(standoff, 2.50)
+
+    def test_group_capture_requires_each_tracked_bottle(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(JetsonYoloRosbridgeClient)
+        client.config = SimpleNamespace(marker_association_radius_m=0.40)
+        targets = [
+            InspectionTarget("c1", "bottle", ObjectPoseMap(1.0, 0.0), 1),
+            InspectionTarget("c2", "bottle", ObjectPoseMap(1.2, 0.0), 2),
+        ]
+        capture = InspectionCaptureState(
+            request_id="inspect_1",
+            cluster_id="group_1",
+            label="bottle",
+            object_pose=_target_center(targets),
+            track_id=None,
+            targets=targets,
+            require_all_visible=True,
+            target_frames=8,
+            deadline=999.0,
+        )
+        both = [
+            Detection("bottle", 0.9, [0, 0, 10, 20], 1),
+            Detection("bottle", 0.8, [20, 0, 30, 20], 2),
+        ]
+        self.assertEqual(
+            len(
+                client._select_inspection_detections(
+                    capture, both, 40, 30, {}
+                )
+            ),
+            2,
+        )
+        self.assertEqual(
+            client._select_inspection_detections(
+                capture, both[:1], 40, 30, {}
+            ),
+            [],
+        )
+
+
+class AutomaticMetricsTest(unittest.TestCase):
+    def test_writes_throttled_inference_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client = JetsonYoloRosbridgeClient.__new__(JetsonYoloRosbridgeClient)
+            client.config = SimpleNamespace(
+                evaluation_metrics_enabled=True,
+                evaluation_metrics_sample_period_s=1.0,
+            )
+            client.performance_log_path = (
+                Path(directory) / "evaluation" / "performance.jsonl"
+            )
+            client.next_evaluation_metrics_sample = 0.0
+            client.last_evaluation_error_log = 0.0
+            client.frame_count = 12
+            detection = Detection(
+                "bottle",
+                0.9,
+                [0, 0, 10, 20],
+                track_id=4,
+                mask=np.ones((20, 10), dtype=bool),
+            )
+            client._record_evaluation_metrics(
+                frame=np.zeros((20, 30, 3), dtype=np.uint8),
+                detections=[detection],
+                anomalies=[detection],
+                camera_fps=15.0,
+                decode_ms=2.0,
+                inference_ms=20.0,
+                detection_stage_ms=22.0,
+            )
+            records = [
+                json.loads(line)
+                for line in client.performance_log_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["inference_ms"], 20.0)
+            self.assertEqual(records[0]["tracked_detections"], 1)
+            self.assertEqual(records[0]["segmented_detections"], 1)
 
 
 class DailyStateTest(unittest.TestCase):

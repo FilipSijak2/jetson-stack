@@ -151,6 +151,16 @@ class AppConfig:
     inspection_jpeg_quality: int = 95
     inspection_once_per_cluster: bool = True
     inspection_retry_cooldown_s: float = 60.0
+    inspection_group_enabled: bool = True
+    inspection_group_radius_m: float = 2.0
+    inspection_group_collection_s: float = 0.75
+    inspection_group_min_objects: int = 2
+    inspection_group_max_objects: int = 10
+    inspection_group_fov_margin_ratio: float = 1.25
+    inspection_group_max_standoff_m: float = 2.50
+    inspection_group_require_all_visible: bool = True
+    evaluation_metrics_enabled: bool = True
+    evaluation_metrics_sample_period_s: float = 1.0
     marker_ray_enabled: bool = True
     marker_ray_ttl_s: float = 2.0
     marker_uncertainty_enabled: bool = True
@@ -281,6 +291,16 @@ ENV_OVERRIDES = {
     "inspection_jpeg_quality": ("INSPECTION_JPEG_QUALITY", _env_int),
     "inspection_once_per_cluster": ("INSPECTION_ONCE_PER_CLUSTER", _env_bool),
     "inspection_retry_cooldown_s": ("INSPECTION_RETRY_COOLDOWN_S", _env_float),
+    "inspection_group_enabled": ("INSPECTION_GROUP_ENABLED", _env_bool),
+    "inspection_group_radius_m": ("INSPECTION_GROUP_RADIUS_M", _env_float),
+    "inspection_group_collection_s": ("INSPECTION_GROUP_COLLECTION_S", _env_float),
+    "inspection_group_min_objects": ("INSPECTION_GROUP_MIN_OBJECTS", _env_int),
+    "inspection_group_max_objects": ("INSPECTION_GROUP_MAX_OBJECTS", _env_int),
+    "inspection_group_fov_margin_ratio": ("INSPECTION_GROUP_FOV_MARGIN_RATIO", _env_float),
+    "inspection_group_max_standoff_m": ("INSPECTION_GROUP_MAX_STANDOFF_M", _env_float),
+    "inspection_group_require_all_visible": ("INSPECTION_GROUP_REQUIRE_ALL_VISIBLE", _env_bool),
+    "evaluation_metrics_enabled": ("EVALUATION_METRICS_ENABLED", _env_bool),
+    "evaluation_metrics_sample_period_s": ("EVALUATION_METRICS_SAMPLE_PERIOD_S", _env_float),
     "marker_ray_enabled": ("MARKER_RAY_ENABLED", _env_bool),
     "marker_ray_ttl_s": ("MARKER_RAY_TTL_S", _env_float),
     "marker_uncertainty_enabled": ("MARKER_UNCERTAINTY_ENABLED", _env_bool),
@@ -380,6 +400,29 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     )
     normalized["inspection_retry_cooldown_s"] = max(
         0.0, float(normalized.get("inspection_retry_cooldown_s", 60.0))
+    )
+    normalized["inspection_group_radius_m"] = max(
+        0.10, float(normalized.get("inspection_group_radius_m", 2.0))
+    )
+    normalized["inspection_group_collection_s"] = max(
+        0.0, float(normalized.get("inspection_group_collection_s", 0.75))
+    )
+    normalized["inspection_group_min_objects"] = max(
+        2, int(normalized.get("inspection_group_min_objects", 2))
+    )
+    normalized["inspection_group_max_objects"] = max(
+        normalized["inspection_group_min_objects"],
+        int(normalized.get("inspection_group_max_objects", 10)),
+    )
+    normalized["inspection_group_fov_margin_ratio"] = max(
+        1.0, float(normalized.get("inspection_group_fov_margin_ratio", 1.25))
+    )
+    normalized["inspection_group_max_standoff_m"] = max(
+        normalized["inspection_standoff_m"],
+        float(normalized.get("inspection_group_max_standoff_m", 2.50)),
+    )
+    normalized["evaluation_metrics_sample_period_s"] = max(
+        0.1, float(normalized.get("evaluation_metrics_sample_period_s", 1.0))
     )
     normalized["marker_uncertainty_sigma_scale"] = max(
         0.0, float(normalized.get("marker_uncertainty_sigma_scale", 2.0))

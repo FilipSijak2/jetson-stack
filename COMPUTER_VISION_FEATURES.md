@@ -331,6 +331,14 @@ inspection_request_timeout_s: 70.0
 inspection_jpeg_quality: 95
 inspection_once_per_cluster: true
 inspection_retry_cooldown_s: 60.0
+inspection_group_enabled: true
+inspection_group_radius_m: 2.0
+inspection_group_collection_s: 0.75
+inspection_group_min_objects: 2
+inspection_group_max_objects: 10
+inspection_group_fov_margin_ratio: 1.25
+inspection_group_max_standoff_m: 2.50
+inspection_group_require_all_visible: true
 ```
 
 Budući da environment ima prednost, u
@@ -359,6 +367,20 @@ Snimke se spremaju u
 `anomaly_logs/images/inspection/<datum>/`, a rezultati u
 `anomaly_logs/inspections.jsonl`. Prebacivanje na joystick tijekom prilaska
 odmah otkazuje inspection goal.
+
+Jetson nakon potvrde kratko prikuplja kandidate tijekom `0.75 s`. Ako su
+najmanje dvije boce medusobno udaljene najvise `2.0 m`, salje ih kao jedan
+group inspection. Goal gleda prema sredistu grupe, a
+standoff se automatski povecava prema rasponu grupe i horizontalnom FOV-u kamere
+(najvise do `2.50 m`). Snima se jedna privacy fotografija i svih 2-10 ciljeva
+mora biti vidljivo u odabranom kadru. Nakon uspjeha sve boce iz grupe oznacavaju
+se pregledanima, pa robot ne radi poseban prilazak svakoj.
+
+Ako Nav2 ne moze planirati ili izvrsiti siguran prilazak, Raspberry uz
+`INSPECTION_CAPTURE_ON_NAV_FAILURE=true` ne zaobilazi costmap niti smanjuje
+sigurnosne margine. Zaustavlja pokusaj navigacije, ceka stabilizaciju i trazi
+grupnu fotografiju iz trenutne pozicije. Ako sve boce nisu vidljive, capture
+zavrsava neuspjehom i moze se ponoviti nakon cooldowna.
 
 Za stvarno kvalitetniji ulaz Raspberry konfiguracija koristi
 `RS_COLOR_PROFILE=640x480x15` i `RS_COMPRESSED_JPEG_QUALITY=75`; konačna
@@ -399,6 +421,66 @@ Event sadrži dodatna polja:
 Maska se ne sprema u JSON jer bi binarni pikseli nepotrebno povećali događaj.
 Spremljena anotirana slika sadrži zelenu masku, bounding box, confidence i
 `track_id`.
+
+## Automatska evaluacija bez anotiranja dataseta
+
+Pipeline jednom u sekundi sprema lagani performance uzorak u:
+
+```text
+anomaly_logs/evaluation/performance.jsonl
+```
+
+Biljeze se decode vrijeme, YOLO inference vrijeme, efektivni camera FPS, broj
+detekcija, tracking coverage i segmentation coverage. Postojeci
+`events.jsonl` ostaje nepromijenjen.
+
+Jedini rucni korak je oznacavanje rijetkog false positive eventa. Za pregled
+jucerasnjih detekcija:
+
+```bash
+python3 scripts/mark_event.py --list --date yesterday
+```
+
+Oznacavanje poznatog ID-a:
+
+```bash
+python3 scripts/mark_event.py anom_00042 --verdict FP
+```
+
+Ako je FP bio zadnji jucerasnji event:
+
+```bash
+python3 scripts/mark_last_event_fp.py --date yesterday
+```
+
+Review se append-only sprema u `anomaly_logs/event_reviews.jsonl`. Originalni
+event i slike se ne mijenjaju. Pogresna oznaka ispravlja se novom naredbom s
+`--verdict TP`; izvjestaj uvijek koristi zadnju oznaku za event.
+
+Izvjestaj se generira:
+
+```bash
+python3 scripts/generate_cv_report.py
+```
+
+Rezultati su:
+
+```text
+anomaly_logs/evaluation/latest/report.html
+anomaly_logs/evaluation/latest/summary.json
+anomaly_logs/evaluation/latest/events.csv
+```
+
+Alati rade i nad starim eventima dok god su njihovi redci jos u
+`events.jsonl`. Za povijesne evente bit ce dostupne event/localization metrike;
+FPS i inference latency postoje tek od verzije pipelinea koja zapisuje
+`performance.jsonl`.
+
+Bez ground truth anotacija precision je procjena u kojoj se neoznaceni eventi
+tretiraju kao stvarne detekcije. Pravi recall, F1, confusion matrix,
+segmentation IoU i apsolutna localization pogreska namjerno se ne prikazuju kao
+ground-truth metrike. Report umjesto toga daje jasno oznacene threshold
+proxy-vrijednosti.
 
 ## Performanse
 
