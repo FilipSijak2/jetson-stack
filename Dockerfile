@@ -69,21 +69,28 @@ RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
     fi
 
 RUN if [ "${INSTALL_ULTRALYTICS}" = "true" ]; then \
-    python3 -m pip install --no-cache-dir --no-deps \
+    if python3 -m pip install --no-cache-dir --no-deps \
         "nvidia-cudss-cu12==${CUDSS_VERSION}" \
-        "nvidia-cusparselt-cu12==${CUSPARSELT_VERSION}" && \
+        "nvidia-cusparselt-cu12==${CUSPARSELT_VERSION}"; then \
+        echo "[jetson-anomaly] Optional NVIDIA Python CUDA helper libs installed"; \
+    else \
+        echo "[jetson-anomaly] WARNING: Optional NVIDIA Python CUDA helper libs failed to install; continuing"; \
+    fi && \
     (python3 -m pip uninstall -y \
         nvidia-cublas-cu12 \
         nvidia-cuda-runtime-cu12 \
         nvidia-cusparse-cu12 \
         nvidia-nvjitlink-cu12 2>/dev/null || true) && \
-    printf '%s\n' \
-        "${NVIDIA_PYTHON_LIBS}/cu12/lib" \
-        "${NVIDIA_PYTHON_LIBS}/cudss/lib" \
-        "${NVIDIA_PYTHON_LIBS}/cusparselt/lib" \
-        > /etc/ld.so.conf.d/nvidia-pip-libs.conf && \
+    { \
+        for d in \
+            "${NVIDIA_PYTHON_LIBS}/cu12/lib" \
+            "${NVIDIA_PYTHON_LIBS}/cudss/lib" \
+            "${NVIDIA_PYTHON_LIBS}/cusparselt/lib"; do \
+            if [ -d "$d" ]; then printf '%s\n' "$d"; fi; \
+        done; \
+    } > /etc/ld.so.conf.d/nvidia-pip-libs.conf && \
     if ldconfig; then \
-        echo "[jetson-anomaly] NVIDIA Python CUDA helper libs added to ld cache"; \
+        echo "[jetson-anomaly] NVIDIA Python CUDA helper lib paths processed"; \
     else \
         echo "[jetson-anomaly] WARNING: ldconfig failed during build; continuing with LD_LIBRARY_PATH"; \
     fi; \
