@@ -1760,7 +1760,14 @@ class JetsonYoloRosbridgeClient:
         if self.config.save_per_event_images:
             original_path = self.original_dir / f"{event_id}_{label_slug}.jpg"
             annotated_path = self.annotated_dir / f"{event_id}_{label_slug}.jpg"
-            annotated = annotate_frame(frame.copy(), group.detections)
+            annotated = build_event_annotated_frame(
+                frame,
+                group.detections,
+                privacy_blur=self.config.save_annotated_privacy_blur,
+                kernel_size=self.config.privacy_blur_kernel_size,
+                padding_ratio=self.config.privacy_bbox_padding_ratio,
+                use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+            )
             _write_image(original_path, frame)
             _write_image(annotated_path, annotated)
 
@@ -2289,6 +2296,31 @@ def blur_except_detections(
             )
 
     return output
+
+
+def build_event_annotated_frame(
+    frame: np.ndarray,
+    detections: List[Detection],
+    *,
+    privacy_blur: bool,
+    kernel_size: int,
+    padding_ratio: float,
+    use_segmentation_masks: bool,
+) -> np.ndarray:
+    base = (
+        blur_except_detections(
+            frame,
+            detections,
+            kernel_size=kernel_size,
+            padding_ratio=padding_ratio,
+            use_segmentation_masks=use_segmentation_masks,
+            draw_track_id=False,
+            draw_mask_overlay=False,
+        )
+        if privacy_blur
+        else frame.copy()
+    )
+    return annotate_frame(base, detections)
 
 
 def _normalized_detection_mask(

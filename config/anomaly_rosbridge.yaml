@@ -90,6 +90,7 @@ inference_every_n_frames: 1
 reconnect_delay_s: 3.0
 jpeg_quality: 85
 save_per_event_images: true
+save_annotated_privacy_blur: true
 daily_map_summary: true
 daily_map_summary_topic_publish: true
 debug_image_always_stream: true

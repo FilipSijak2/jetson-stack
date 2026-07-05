@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
 from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
@@ -21,6 +22,7 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     _local_day_key,
     _target_center,
     blur_except_detections,
+    build_event_annotated_frame,
 )
 from jetson_anomaly_detector.event_schema import build_event
 from jetson_anomaly_detector.localization import (
@@ -126,8 +128,45 @@ class TrackingAndSegmentationTest(unittest.TestCase):
             kernel_size=21,
             use_segmentation_masks=True,
         )
-        np.testing.assert_array_equal(result[40:50, 55:65], frame[40:50, 55:65])
+        np.testing.assert_array_equal(
+            result[40:50, 55:65], frame[40:50, 55:65]
+        )
         self.assertFalse(np.array_equal(result[20:30, 30:40], frame[20:30, 30:40]))
+
+    def test_saved_annotated_frame_blurs_everything_except_bottle(self) -> None:
+        rng = np.random.default_rng(11)
+        frame = rng.integers(0, 256, size=(80, 120, 3), dtype=np.uint8)
+        original = frame.copy()
+        mask = np.zeros((80, 120), dtype=bool)
+        mask[30:60, 50:70] = True
+        detection = Detection(
+            "bottle",
+            0.91,
+            [45, 25, 75, 65],
+            track_id=29,
+            mask=mask,
+        )
+
+        result = build_event_annotated_frame(
+            frame,
+            [detection],
+            privacy_blur=True,
+            kernel_size=21,
+            padding_ratio=0.0,
+            use_segmentation_masks=True,
+        )
+
+        tint = np.zeros_like(frame)
+        tint[:, :, 1] = 220
+        expected_overlay = cv2.addWeighted(frame, 0.75, tint, 0.25, 0.0)
+        np.testing.assert_array_equal(
+            result[40:50, 55:65],
+            expected_overlay[40:50, 55:65],
+        )
+        self.assertFalse(
+            np.array_equal(result[5:15, 5:15], frame[5:15, 5:15])
+        )
+        np.testing.assert_array_equal(frame, original)
 
     def test_depth_estimation_uses_segmentation_mask(self) -> None:
         depth = np.full((100, 100), 4.0, dtype=np.float32)

@@ -91,6 +91,7 @@ MARKER_MAX_FAR_JUMP_M=0.60
 ANOMALY_MIN_OBSERVATIONS=2
 ANOMALY_CONFIRMATION_TTL_S=6.0
 SAVE_PER_EVENT_IMAGES=1
+SAVE_ANNOTATED_PRIVACY_BLUR=1
 DAILY_MAP_SUMMARY=1
 DEBUG_IMAGE_ALWAYS_STREAM=1
 DEBUG_IMAGE_ON_DETECTION=1
@@ -401,7 +402,8 @@ bag analysis.
 Jetson writes:
 
 - original frames: `/home/jetson/anomaly_logs/images/original/`
-- annotated frames: `/home/jetson/anomaly_logs/images/annotated/`
+- annotated frames: `/home/jetson/anomaly_logs/images/annotated/` (blurred
+  outside the detected bottle when `SAVE_ANNOTATED_PRIVACY_BLUR=1`)
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`
