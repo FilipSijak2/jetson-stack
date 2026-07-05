@@ -82,9 +82,10 @@ LASER_WINDOW_DEG=6
 ANOMALY_CLASSES=bottle
 CONFIDENCE_THRESHOLD=0.5
 DETECTION_COOLDOWN_S=5
-CLUSTER_MERGE_RADIUS_M=1.00
-MARKER_ASSOCIATION_RADIUS_M=2.00
-REPORTED_MERGE_RADIUS_M=2.00
+CLUSTER_MERGE_RADIUS_M=0.25
+MARKER_ASSOCIATION_RADIUS_M=0.40
+REPORTED_MERGE_RADIUS_M=1.00
+TRACK_REASSOCIATION_RADIUS_M=1.00
 ANOMALY_MIN_OBSERVATIONS=2
 ANOMALY_CONFIRMATION_TTL_S=6.0
 SAVE_PER_EVENT_IMAGES=1
@@ -131,6 +132,12 @@ JETSON_LOG_DIR=/workspace/logs
 The structured YAML defaults live in `config/anomaly_rosbridge.yaml`.
 Environment variables from `config/containers/jetson_anomaly.env` override the
 YAML values.
+
+`TRACK_REASSOCIATION_RADIUS_M` handles tracker ID churn. If ByteTrack loses a
+bottle and assigns it a new ID, the new track can reuse the previous marker and
+reported event within this radius. Different track IDs that are visible in the
+same frame remain separate, so nearby real bottles are not collapsed into one
+object. `REPORTED_MERGE_RADIUS_M` is the same-day event deduplication radius.
 
 When RealSense camera info and aligned depth are available, Jetson uses the
 camera intrinsic matrix to calculate the horizontal ray and depth to calculate

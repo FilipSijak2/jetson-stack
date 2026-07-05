@@ -170,6 +170,7 @@ class JetsonYoloRosbridgeClient:
             text_show_count=config.marker_text_show_count,
             text_compact=config.marker_text_compact,
             tracked_object_min_separation_m=config.tracked_object_min_separation_m,
+            track_reassociation_radius_m=config.track_reassociation_radius_m,
             ray_enabled=config.marker_ray_enabled,
             ray_ttl_s=config.marker_ray_ttl_s,
             uncertainty_enabled=config.marker_uncertainty_enabled,
@@ -427,10 +428,18 @@ class JetsonYoloRosbridgeClient:
         candidates = self._collect_inspection_candidates(candidates)
         if not candidates:
             return
+        visible_track_ids = {
+            track_id
+            for candidate in candidates
+            for track_id in [_best_track_id(candidate.group.detections)]
+            if track_id is not None
+        }
         eligible = [
             candidate
             for candidate in candidates
-            if self._inspection_candidate_is_eligible(candidate.group)
+            if self._inspection_candidate_is_eligible(
+                candidate.group, visible_track_ids
+            )
         ]
         if not eligible:
             return
@@ -569,7 +578,9 @@ class JetsonYoloRosbridgeClient:
         return collected
 
     def _inspection_candidate_is_eligible(
-        self, group: DetectionGroup
+        self,
+        group: DetectionGroup,
+        visible_track_ids: Optional[set[int]] = None,
     ) -> bool:
         estimate = group.distance_estimate
         if (
@@ -593,7 +604,10 @@ class JetsonYoloRosbridgeClient:
         if (
             self.config.inspection_once_per_cluster
             and self._inspection_already_completed(
-                group.label, group.object_pose, track_id
+                group.label,
+                group.object_pose,
+                track_id,
+                visible_track_ids,
             )
         ):
             return False
@@ -931,20 +945,29 @@ class JetsonYoloRosbridgeClient:
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int],
+        visible_track_ids: Optional[set[int]] = None,
     ) -> bool:
         radius = max(0.05, self.config.reported_merge_radius_m)
         for inspected in self.inspected_locations:
             if inspected.label != label:
                 continue
             distance = _distance_xy(inspected.object_pose, object_pose)
-            if (
+            different_tracks = (
                 track_id is not None
                 and inspected.track_id is not None
                 and track_id != inspected.track_id
-                and distance >= self.config.tracked_object_min_separation_m
+            )
+            if different_tracks and (
+                visible_track_ids is None
+                or inspected.track_id in visible_track_ids
             ):
                 continue
-            if distance <= radius:
+            association_radius = (
+                max(radius, self.config.track_reassociation_radius_m)
+                if different_tracks
+                else radius
+            )
+            if distance <= association_radius:
                 return True
         return False
 
@@ -1069,8 +1092,17 @@ class JetsonYoloRosbridgeClient:
             for detection in anomalies
         ]
         inspection_candidates: List[InspectionCandidate] = []
-        for group in self._group_located_detections(located):
-            confirmed_group = self._confirm_detection_group(group)
+        groups = self._group_located_detections(located)
+        visible_track_ids = {
+            track_id
+            for group in groups
+            for track_id in [_best_track_id(group.detections)]
+            if track_id is not None
+        }
+        for group in groups:
+            confirmed_group = self._confirm_detection_group(
+                group, visible_track_ids
+            )
             if confirmed_group is None:
                 continue
             cluster = self.markers.add_or_update(
@@ -1081,6 +1113,7 @@ class JetsonYoloRosbridgeClient:
                 robot_pose=self.latest_pose,
                 uncertainty_m=confirmed_group.distance_estimate.uncertainty_m,
                 track_id=_best_track_id(confirmed_group.detections),
+                visible_track_ids=visible_track_ids,
             )
             self.daily_clusters[cluster.cluster_id] = cluster
             inspection_candidates.append(
@@ -1088,11 +1121,17 @@ class JetsonYoloRosbridgeClient:
             )
             track_id = _best_track_id(confirmed_group.detections)
             if self._already_reported(
-                confirmed_group.label, cluster.object_pose, track_id
+                confirmed_group.label,
+                cluster.object_pose,
+                track_id,
+                visible_track_ids,
             ):
                 self._log_event_gate("already_reported_today", confirmed_group)
                 self._remember_reported(
-                    confirmed_group.label, cluster.object_pose, track_id
+                    confirmed_group.label,
+                    cluster.object_pose,
+                    track_id,
+                    visible_track_ids,
                 )
                 self._refresh_daily_map_summary(msg)
                 continue
@@ -1278,10 +1317,14 @@ class JetsonYoloRosbridgeClient:
             z=sum(item.object_pose.z for item in group) / count,
         )
 
-    def _confirm_detection_group(self, group: DetectionGroup) -> Optional[DetectionGroup]:
+    def _confirm_detection_group(
+        self,
+        group: DetectionGroup,
+        visible_track_ids: Optional[set[int]] = None,
+    ) -> Optional[DetectionGroup]:
         if self.config.anomaly_min_observations <= 1:
             return group
-        pending = self._remember_pending_anomaly(group)
+        pending = self._remember_pending_anomaly(group, visible_track_ids)
         if pending.observations < self.config.anomaly_min_observations:
             self._log_event_gate(
                 f"pending_{pending.observations}_of_{self.config.anomaly_min_observations}",
@@ -1296,11 +1339,17 @@ class JetsonYoloRosbridgeClient:
             bearing_source=group.bearing_source,
         )
 
-    def _remember_pending_anomaly(self, group: DetectionGroup) -> PendingAnomaly:
+    def _remember_pending_anomaly(
+        self,
+        group: DetectionGroup,
+        visible_track_ids: Optional[set[int]] = None,
+    ) -> PendingAnomaly:
         now = time.monotonic()
         self._drop_stale_pending_anomalies(now)
         track_id = _best_track_id(group.detections)
-        index = self._pending_index(group.label, group.object_pose, track_id)
+        index = self._pending_index(
+            group.label, group.object_pose, track_id, visible_track_ids
+        )
         if index is None:
             pending = PendingAnomaly(
                 label=group.label,
@@ -1337,6 +1386,7 @@ class JetsonYoloRosbridgeClient:
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int],
+        visible_track_ids: Optional[set[int]] = None,
     ) -> Optional[int]:
         if track_id is not None:
             for index, pending in enumerate(self.pending_anomalies):
@@ -1344,23 +1394,33 @@ class JetsonYoloRosbridgeClient:
                     pending.label == label
                     and pending.track_id == track_id
                     and _distance_xy(pending.object_pose, object_pose)
-                    <= self.config.marker_association_radius_m
+                    <= self.config.track_reassociation_radius_m
                 ):
                     return index
-        radius = max(0.01, self.config.cluster_merge_radius_m)
         nearest_index = None
         nearest_distance = float("inf")
         for index, pending in enumerate(self.pending_anomalies):
             if pending.label != label:
                 continue
             distance = _distance_xy(pending.object_pose, object_pose)
-            if (
+            different_tracks = (
                 track_id is not None
                 and pending.track_id is not None
                 and track_id != pending.track_id
-                and distance >= self.config.tracked_object_min_separation_m
+            )
+            if different_tracks and (
+                visible_track_ids is None
+                or pending.track_id in visible_track_ids
             ):
                 continue
+            same_track = (
+                track_id is not None and track_id == pending.track_id
+            )
+            radius = (
+                self.config.track_reassociation_radius_m
+                if different_tracks or same_track
+                else max(0.01, self.config.cluster_merge_radius_m)
+            )
             if distance <= radius and distance < nearest_distance:
                 nearest_index = index
                 nearest_distance = distance
@@ -1392,28 +1452,43 @@ class JetsonYoloRosbridgeClient:
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int] = None,
+        visible_track_ids: Optional[set[int]] = None,
     ) -> bool:
-        return self._reported_index(label, object_pose, track_id) is not None
+        return (
+            self._reported_index(
+                label, object_pose, track_id, visible_track_ids
+            )
+            is not None
+        )
 
     def _reported_index(
         self,
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int] = None,
+        visible_track_ids: Optional[set[int]] = None,
     ) -> Optional[int]:
         radius = max(0.01, self.config.reported_merge_radius_m)
         for index, reported in enumerate(self.reported_anomalies):
             if reported.label != label:
                 continue
             distance = _distance_xy(reported.object_pose, object_pose)
-            if (
+            different_tracks = (
                 track_id is not None
                 and reported.track_id is not None
                 and track_id != reported.track_id
-                and distance >= self.config.tracked_object_min_separation_m
+            )
+            if different_tracks and (
+                visible_track_ids is None
+                or reported.track_id in visible_track_ids
             ):
                 continue
-            if distance <= radius:
+            association_radius = (
+                max(radius, self.config.track_reassociation_radius_m)
+                if different_tracks
+                else radius
+            )
+            if distance <= association_radius:
                 return index
         return None
 
@@ -1422,8 +1497,11 @@ class JetsonYoloRosbridgeClient:
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int] = None,
+        visible_track_ids: Optional[set[int]] = None,
     ) -> None:
-        index = self._reported_index(label, object_pose, track_id)
+        index = self._reported_index(
+            label, object_pose, track_id, visible_track_ids
+        )
         if index is None:
             self.reported_anomalies.append(
                 ReportedAnomaly(label, object_pose, track_id)
@@ -1482,7 +1560,15 @@ class JetsonYoloRosbridgeClient:
 
             if label:
                 before = len(self.reported_anomalies)
-                self._remember_reported(label, object_pose, track_id)
+                # A restart has no same-frame visibility context. Treat a
+                # stored replacement track as absent so historical ID churn
+                # is spatially collapsed instead of recreating every marker.
+                self._remember_reported(
+                    label,
+                    object_pose,
+                    track_id,
+                    {track_id} if track_id is not None else set(),
+                )
                 if len(self.reported_anomalies) > before:
                     loaded += 1
 

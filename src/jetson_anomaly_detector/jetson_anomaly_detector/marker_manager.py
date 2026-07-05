@@ -174,6 +174,7 @@ class MarkerManager:
         text_show_count: bool = False,
         text_compact: bool = True,
         tracked_object_min_separation_m: float = 0.01,
+        track_reassociation_radius_m: Optional[float] = None,
         ray_enabled: bool = True,
         ray_ttl_s: float = 2.0,
         uncertainty_enabled: bool = True,
@@ -195,6 +196,12 @@ class MarkerManager:
         self.text_compact = bool(text_compact)
         self.tracked_object_min_separation_m = max(
             0.01, float(tracked_object_min_separation_m)
+        )
+        self.track_reassociation_radius_m = max(
+            self.association_radius_m,
+            float(track_reassociation_radius_m)
+            if track_reassociation_radius_m is not None
+            else self.association_radius_m,
         )
         self.ray_enabled = bool(ray_enabled)
         self.ray_ttl_s = max(0.1, float(ray_ttl_s))
@@ -220,8 +227,12 @@ class MarkerManager:
         robot_pose: Optional[RobotPoseMap] = None,
         uncertainty_m: Optional[float] = None,
         track_id: Optional[int] = None,
+        visible_track_ids: Optional[Sequence[int]] = None,
     ) -> AnomalyClusterSummary:
-        cluster = self._nearest_cluster(label, object_pose, track_id)
+        visible_ids = set(visible_track_ids) if visible_track_ids is not None else None
+        cluster = self._nearest_cluster(
+            label, object_pose, track_id, visible_ids
+        )
         if cluster is None:
             cluster = ActiveCluster(
                 cluster_id=f"cluster_{self.next_cluster_index:05d}",
@@ -251,7 +262,7 @@ class MarkerManager:
             cluster.track_id = track_id if track_id is not None else cluster.track_id
             cluster.ray_expires_at = time.monotonic() + self.ray_ttl_s
 
-        cluster = self._merge_overlapping_clusters(cluster)
+        cluster = self._merge_overlapping_clusters(cluster, visible_ids)
         return self._summary(cluster)
 
     def build_marker_array(self) -> Dict[str, Any]:
@@ -291,6 +302,7 @@ class MarkerManager:
         label: str,
         object_pose: ObjectPoseMap,
         track_id: Optional[int],
+        visible_track_ids: Optional[set[int]],
     ) -> Optional[ActiveCluster]:
         nearest = None
         nearest_distance = float("inf")
@@ -298,19 +310,33 @@ class MarkerManager:
             if cluster.label != label:
                 continue
             distance = math.hypot(cluster.object_pose.x - object_pose.x, cluster.object_pose.y - object_pose.y)
-            if (
+            different_tracks = (
                 track_id is not None
                 and cluster.track_id is not None
                 and track_id != cluster.track_id
-                and distance >= self.tracked_object_min_separation_m
+            )
+            if different_tracks and (
+                visible_track_ids is None or cluster.track_id in visible_track_ids
             ):
                 continue
-            if distance <= self.association_radius_m and distance < nearest_distance:
+            same_track = (
+                track_id is not None and track_id == cluster.track_id
+            )
+            radius = (
+                self.track_reassociation_radius_m
+                if different_tracks or same_track
+                else self.association_radius_m
+            )
+            if distance <= radius and distance < nearest_distance:
                 nearest = cluster
                 nearest_distance = distance
         return nearest
 
-    def _merge_overlapping_clusters(self, target: ActiveCluster) -> ActiveCluster:
+    def _merge_overlapping_clusters(
+        self,
+        target: ActiveCluster,
+        visible_track_ids: Optional[set[int]],
+    ) -> ActiveCluster:
         merged = True
         while merged:
             merged = False
@@ -321,14 +347,26 @@ class MarkerManager:
                     target.object_pose.x - candidate.object_pose.x,
                     target.object_pose.y - candidate.object_pose.y,
                 )
-                if (
+                different_tracks = (
                     target.track_id is not None
                     and candidate.track_id is not None
                     and target.track_id != candidate.track_id
-                    and distance >= self.tracked_object_min_separation_m
+                )
+                if different_tracks and (
+                    visible_track_ids is None
+                    or candidate.track_id in visible_track_ids
                 ):
                     continue
-                if distance > self.association_radius_m:
+                same_track = (
+                    target.track_id is not None
+                    and target.track_id == candidate.track_id
+                )
+                radius = (
+                    self.track_reassociation_radius_m
+                    if different_tracks or same_track
+                    else self.association_radius_m
+                )
+                if distance > radius:
                     continue
                 target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose, new_weight=0.5)
                 target.count += candidate.count

@@ -163,9 +163,19 @@ class YoloDetector:
             if boxes is None:
                 continue
             masks = getattr(getattr(result, "masks", None), "data", None)
-            if self.segmentation_enabled and masks is None and not self._missing_masks_warned:
+            try:
+                box_count = len(boxes)
+            except TypeError:
+                box_count = 0
+            if (
+                self.segmentation_enabled
+                and box_count > 0
+                and masks is None
+                and not self._missing_masks_warned
+            ):
                 self.logger.warning(
-                    "SEGMENTATION_ENABLED=1 but model returned no masks. "
+                    "SEGMENTATION_ENABLED=1 and detections exist, but the model "
+                    "returned no masks. "
                     "Use a *-seg.pt/*-seg.engine model; falling back to bounding boxes."
                 )
                 self._missing_masks_warned = True

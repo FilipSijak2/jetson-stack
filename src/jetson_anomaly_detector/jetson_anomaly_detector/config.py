@@ -79,6 +79,7 @@ class AppConfig:
     cluster_merge_radius_m: float = 1.00
     marker_association_radius_m: float = 2.00
     reported_merge_radius_m: float = 2.00
+    track_reassociation_radius_m: float = 1.00
     anomaly_min_observations: int = 2
     anomaly_confirmation_ttl_s: float = 6.0
     marker_object_size_m: float = 0.20
@@ -219,6 +220,7 @@ ENV_OVERRIDES = {
     "cluster_merge_radius_m": ("CLUSTER_MERGE_RADIUS_M", _env_float),
     "marker_association_radius_m": ("MARKER_ASSOCIATION_RADIUS_M", _env_float),
     "reported_merge_radius_m": ("REPORTED_MERGE_RADIUS_M", _env_float),
+    "track_reassociation_radius_m": ("TRACK_REASSOCIATION_RADIUS_M", _env_float),
     "anomaly_min_observations": ("ANOMALY_MIN_OBSERVATIONS", _env_int),
     "anomaly_confirmation_ttl_s": ("ANOMALY_CONFIRMATION_TTL_S", _env_float),
     "marker_object_size_m": ("MARKER_OBJECT_SIZE_M", _env_float),
@@ -476,6 +478,10 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["reported_merge_radius_m"] = max(
         normalized["marker_association_radius_m"],
         float(normalized.get("reported_merge_radius_m", 2.00)),
+    )
+    normalized["track_reassociation_radius_m"] = max(
+        normalized["marker_association_radius_m"],
+        float(normalized.get("track_reassociation_radius_m", 1.00)),
     )
     normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 2)))
     normalized["anomaly_confirmation_ttl_s"] = max(

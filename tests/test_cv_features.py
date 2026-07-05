@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     InspectionCaptureState,
     InspectionTarget,
     JetsonYoloRosbridgeClient,
+    ReportedAnomaly,
     _detection_sharpness,
     _group_inspection_candidates,
     _local_day_key,
@@ -89,6 +91,22 @@ class TrackingAndSegmentationTest(unittest.TestCase):
         self.assertEqual(detection.bbox_xyxy, [10, 12, 40, 60])
         self.assertEqual(detection.mask.shape, (100, 200))
         self.assertTrue(np.any(detection.mask))
+
+    def test_empty_segmentation_result_does_not_warn_about_missing_masks(self) -> None:
+        logger = Mock()
+        detector = YoloDetector(
+            model_path="unused.pt",
+            confidence_threshold=0.5,
+            anomaly_classes=["bottle"],
+            mock_mode=True,
+            logger=logger,
+            segmentation_enabled=True,
+        )
+        logger.reset_mock()
+        result = SimpleNamespace(names={0: "bottle"}, boxes=[], masks=None)
+
+        self.assertEqual(detector._parse_results([result], (100, 200)), [])
+        logger.warning.assert_not_called()
 
     def test_privacy_stream_preserves_mask_not_whole_bbox(self) -> None:
         rng = np.random.default_rng(7)
@@ -307,6 +325,59 @@ class MarkerVisualizationTest(unittest.TestCase):
         }
         self.assertEqual(labels, {"#10", "#11"})
 
+    def test_replacement_track_reuses_marker_when_old_track_disappears(self) -> None:
+        manager = MarkerManager(
+            association_radius_m=0.40,
+            track_reassociation_radius_m=1.00,
+            ray_enabled=False,
+            uncertainty_enabled=False,
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.0, 1.0),
+            1,
+            30.0,
+            track_id=10,
+            visible_track_ids={10},
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.7, 1.0),
+            1,
+            30.0,
+            track_id=11,
+            visible_track_ids={11},
+        )
+
+        self.assertEqual(len(manager.active), 1)
+        self.assertEqual(next(iter(manager.active.values())).track_id, 11)
+
+    def test_simultaneously_visible_tracks_do_not_reassociate(self) -> None:
+        manager = MarkerManager(
+            association_radius_m=0.40,
+            track_reassociation_radius_m=1.00,
+            ray_enabled=False,
+            uncertainty_enabled=False,
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.0, 1.0),
+            1,
+            30.0,
+            track_id=10,
+            visible_track_ids={10},
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.2, 1.0),
+            1,
+            30.0,
+            track_id=11,
+            visible_track_ids={10, 11},
+        )
+
+        self.assertEqual(len(manager.active), 2)
+
 
 class InspectionCaptureTest(unittest.TestCase):
     def test_sharpness_prefers_detailed_bottle_crop(self) -> None:
@@ -439,6 +510,48 @@ class AutomaticMetricsTest(unittest.TestCase):
 
 
 class DailyStateTest(unittest.TestCase):
+    def test_reported_event_reassociates_replacement_track(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.config = SimpleNamespace(
+            reported_merge_radius_m=1.0,
+            track_reassociation_radius_m=1.0,
+        )
+        client.reported_anomalies = [
+            ReportedAnomaly("bottle", ObjectPoseMap(1.0, 1.0), 10)
+        ]
+
+        self.assertTrue(
+            client._already_reported(
+                "bottle",
+                ObjectPoseMap(1.7, 1.0),
+                track_id=11,
+                visible_track_ids={11},
+            )
+        )
+
+    def test_reported_event_keeps_two_visible_tracks_separate(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.config = SimpleNamespace(
+            reported_merge_radius_m=1.0,
+            track_reassociation_radius_m=1.0,
+        )
+        client.reported_anomalies = [
+            ReportedAnomaly("bottle", ObjectPoseMap(1.0, 1.0), 10)
+        ]
+
+        self.assertFalse(
+            client._already_reported(
+                "bottle",
+                ObjectPoseMap(1.2, 1.0),
+                track_id=11,
+                visible_track_ids={10, 11},
+            )
+        )
+
     def test_loads_only_current_day_for_dedup_but_keeps_global_counter(self) -> None:
         now = datetime.now().astimezone()
         today = now.isoformat()
@@ -454,7 +567,15 @@ class DailyStateTest(unittest.TestCase):
                 "id": "anom_00042",
                 "timestamp": today,
                 "label": "bottle",
+                "track_id": 10,
                 "object_pose_map": {"x": 4.0, "y": 4.0, "z": 0.0},
+            },
+            {
+                "id": "anom_00043",
+                "timestamp": today,
+                "label": "bottle",
+                "track_id": 11,
+                "object_pose_map": {"x": 4.7, "y": 4.0, "z": 0.0},
             },
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -469,14 +590,14 @@ class DailyStateTest(unittest.TestCase):
             client.current_daily_key = _local_day_key()
             client.reported_anomalies = []
             client.config = SimpleNamespace(
-                reported_merge_radius_m=0.45,
-                tracked_object_min_separation_m=0.12,
+                reported_merge_radius_m=1.0,
+                track_reassociation_radius_m=1.0,
             )
             client._load_reported_anomalies()
 
-        self.assertEqual(client.event_counter, 42)
+        self.assertEqual(client.event_counter, 43)
         self.assertEqual(len(client.reported_anomalies), 1)
-        self.assertAlmostEqual(client.reported_anomalies[0].object_pose.x, 4.0)
+        self.assertAlmostEqual(client.reported_anomalies[0].object_pose.x, 4.175)
 
 
 if __name__ == "__main__":
