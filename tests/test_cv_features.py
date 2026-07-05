@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -149,6 +149,36 @@ class TrackingAndSegmentationTest(unittest.TestCase):
         self.assertIsNotNone(measurement)
         assert measurement is not None
         self.assertAlmostEqual(measurement.distance_m, 2.0)
+
+    def test_depth_filter_rejects_far_jump_and_accepts_closer_value(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.config = SimpleNamespace(
+            depth_track_filter_enabled=True,
+            depth_track_filter_ttl_s=3.0,
+            depth_track_max_far_jump_m=0.60,
+        )
+        client.track_depth_states = {}
+        client.last_depth_outlier_log = {}
+        detection = Detection(
+            "bottle", 0.9, [0, 0, 10, 20], track_id=288
+        )
+        robot = RobotPoseMap(0.0, 0.0, 0.0)
+
+        first = client._stabilize_track_depth(
+            detection, DistanceEstimate(1.0, "depth", 0.05), robot
+        )
+        farther = client._stabilize_track_depth(
+            detection, DistanceEstimate(3.0, "depth", 0.05), robot
+        )
+        closer = client._stabilize_track_depth(
+            detection, DistanceEstimate(0.8, "depth", 0.05), robot
+        )
+
+        self.assertEqual(first.distance_m, 1.0)
+        self.assertEqual(farther.distance_m, 1.0)
+        self.assertEqual(closer.distance_m, 0.8)
 
     def test_event_reports_track_and_mask_without_serializing_pixels(self) -> None:
         detection = Detection(
@@ -378,6 +408,73 @@ class MarkerVisualizationTest(unittest.TestCase):
 
         self.assertEqual(len(manager.active), 2)
 
+    def test_same_track_never_creates_second_marker_after_far_jump(self) -> None:
+        manager = MarkerManager(
+            association_radius_m=0.40,
+            track_reassociation_radius_m=1.00,
+            max_far_jump_m=0.60,
+            ray_enabled=False,
+            uncertainty_enabled=False,
+        )
+        robot = RobotPoseMap(0.0, 0.0, 0.0)
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.0, 0.0),
+            1,
+            30.0,
+            robot_pose=robot,
+            track_id=288,
+            visible_track_ids={288},
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(4.0, 0.0),
+            1,
+            30.0,
+            robot_pose=robot,
+            track_id=288,
+            visible_track_ids={288},
+        )
+
+        self.assertEqual(len(manager.active), 1)
+        cluster = next(iter(manager.active.values()))
+        self.assertEqual(cluster.track_id, 288)
+        self.assertAlmostEqual(cluster.object_pose.x, 1.0)
+
+    def test_replacement_track_on_same_camera_ray_reuses_near_marker(self) -> None:
+        manager = MarkerManager(
+            association_radius_m=0.40,
+            track_reassociation_radius_m=1.00,
+            track_reassociation_ray_tolerance_m=0.35,
+            max_far_jump_m=0.60,
+            ray_enabled=False,
+            uncertainty_enabled=False,
+        )
+        robot = RobotPoseMap(0.0, 0.0, 0.0)
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(1.0, 0.0),
+            1,
+            30.0,
+            robot_pose=robot,
+            track_id=276,
+            visible_track_ids={276},
+        )
+        manager.add_or_update(
+            "bottle",
+            ObjectPoseMap(4.0, 0.1),
+            1,
+            30.0,
+            robot_pose=robot,
+            track_id=288,
+            visible_track_ids={288},
+        )
+
+        self.assertEqual(len(manager.active), 1)
+        cluster = next(iter(manager.active.values()))
+        self.assertEqual(cluster.track_id, 288)
+        self.assertAlmostEqual(cluster.object_pose.x, 1.0)
+
 
 class InspectionCaptureTest(unittest.TestCase):
     def test_sharpness_prefers_detailed_bottle_crop(self) -> None:
@@ -466,6 +563,63 @@ class InspectionCaptureTest(unittest.TestCase):
             [],
         )
 
+    def test_capture_reassociates_changed_track_with_wider_radius(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.config = SimpleNamespace(track_reassociation_radius_m=1.0)
+        target = InspectionTarget(
+            "c1", "bottle", ObjectPoseMap(1.0, 0.0), 1
+        )
+        capture = InspectionCaptureState(
+            request_id="inspect_1",
+            cluster_id="c1",
+            label="bottle",
+            object_pose=target.object_pose,
+            track_id=1,
+            targets=[target],
+            require_all_visible=False,
+            target_frames=8,
+            deadline=999.0,
+        )
+        replacement = Detection(
+            "bottle", 0.30, [0, 0, 10, 20], track_id=7
+        )
+        client._locate_detection = Mock(
+            return_value=SimpleNamespace(
+                object_pose=ObjectPoseMap(1.8, 0.0)
+            )
+        )
+
+        selected = client._select_inspection_detections(
+            capture, [replacement], 40, 30, {}
+        )
+
+        self.assertEqual(selected, [replacement])
+
+    def test_capture_timeout_is_checked_without_camera_frame(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.inspection_capture = InspectionCaptureState(
+            request_id="inspect_1",
+            cluster_id="c1",
+            label="bottle",
+            object_pose=ObjectPoseMap(1.0, 0.0),
+            track_id=1,
+            targets=[],
+            require_all_visible=False,
+            target_frames=8,
+            deadline=0.0,
+        )
+        client._finish_inspection_capture = Mock()
+
+        client._expire_inspection_capture_if_due()
+
+        client._finish_inspection_capture.assert_called_once_with(
+            False, "capture_timeout"
+        )
+
 
 class AutomaticMetricsTest(unittest.TestCase):
     def test_writes_throttled_inference_sample(self) -> None:
@@ -510,6 +664,29 @@ class AutomaticMetricsTest(unittest.TestCase):
 
 
 class DailyStateTest(unittest.TestCase):
+    def test_first_map_message_rebuilds_stale_daily_png(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.latest_map = None
+        client.daily_map_initialized = False
+        client.reported_anomalies = [
+            ReportedAnomaly("bottle", ObjectPoseMap(1.0, 1.0), 10)
+        ]
+        rebuilt = (Path("anomalies_today.png"), np.zeros((2, 2, 3)))
+        client._refresh_daily_map_summary = Mock(return_value=rebuilt)
+
+        with patch(
+            "jetson_anomaly_detector.jetson_yolo_rosbridge_client.parse_occupancy_grid",
+            return_value=SimpleNamespace(),
+        ):
+            client._on_map({})
+
+        self.assertTrue(client.daily_map_initialized)
+        client._refresh_daily_map_summary.assert_called_once_with(
+            {}, force=True
+        )
+
     def test_reported_event_reassociates_replacement_track(self) -> None:
         client = JetsonYoloRosbridgeClient.__new__(
             JetsonYoloRosbridgeClient
@@ -528,6 +705,27 @@ class DailyStateTest(unittest.TestCase):
                 ObjectPoseMap(1.7, 1.0),
                 track_id=11,
                 visible_track_ids={11},
+            )
+        )
+
+    def test_reported_event_matches_same_track_despite_far_depth_jump(self) -> None:
+        client = JetsonYoloRosbridgeClient.__new__(
+            JetsonYoloRosbridgeClient
+        )
+        client.config = SimpleNamespace(
+            reported_merge_radius_m=1.0,
+            track_reassociation_radius_m=1.0,
+        )
+        client.reported_anomalies = [
+            ReportedAnomaly("bottle", ObjectPoseMap(1.0, 1.0), 288)
+        ]
+
+        self.assertTrue(
+            client._already_reported(
+                "bottle",
+                ObjectPoseMap(5.0, 1.0),
+                track_id=288,
+                visible_track_ids={288},
             )
         )
 

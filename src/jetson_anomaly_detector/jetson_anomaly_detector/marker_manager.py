@@ -175,6 +175,8 @@ class MarkerManager:
         text_compact: bool = True,
         tracked_object_min_separation_m: float = 0.01,
         track_reassociation_radius_m: Optional[float] = None,
+        track_reassociation_ray_tolerance_m: float = 0.35,
+        max_far_jump_m: float = 0.60,
         ray_enabled: bool = True,
         ray_ttl_s: float = 2.0,
         uncertainty_enabled: bool = True,
@@ -203,6 +205,10 @@ class MarkerManager:
             if track_reassociation_radius_m is not None
             else self.association_radius_m,
         )
+        self.track_reassociation_ray_tolerance_m = max(
+            0.05, float(track_reassociation_ray_tolerance_m)
+        )
+        self.max_far_jump_m = max(0.05, float(max_far_jump_m))
         self.ray_enabled = bool(ray_enabled)
         self.ray_ttl_s = max(0.1, float(ray_ttl_s))
         self.uncertainty_enabled = bool(uncertainty_enabled)
@@ -231,7 +237,7 @@ class MarkerManager:
     ) -> AnomalyClusterSummary:
         visible_ids = set(visible_track_ids) if visible_track_ids is not None else None
         cluster = self._nearest_cluster(
-            label, object_pose, track_id, visible_ids
+            label, object_pose, track_id, visible_ids, robot_pose
         )
         if cluster is None:
             cluster = ActiveCluster(
@@ -251,7 +257,12 @@ class MarkerManager:
             self.next_marker_base_id += self.marker_stride
             self.active[cluster.cluster_id] = cluster
         else:
-            cluster.object_pose = self._blend_pose(cluster.object_pose, object_pose, new_weight=0.20)
+            if not self._is_farther_distance_outlier(
+                cluster.object_pose, object_pose, robot_pose
+            ):
+                cluster.object_pose = self._blend_pose(
+                    cluster.object_pose, object_pose, new_weight=0.20
+                )
             cluster.count += max(1, observed_count)
             cluster.expires_at = time.monotonic() + ttl_s
             cluster.ttl_s = ttl_s
@@ -303,7 +314,26 @@ class MarkerManager:
         object_pose: ObjectPoseMap,
         track_id: Optional[int],
         visible_track_ids: Optional[set[int]],
+        robot_pose: Optional[RobotPoseMap],
     ) -> Optional[ActiveCluster]:
+        exact_track_matches = [
+            cluster
+            for cluster in self.active.values()
+            if (
+                cluster.label == label
+                and track_id is not None
+                and cluster.track_id == track_id
+            )
+        ]
+        if exact_track_matches:
+            return min(
+                exact_track_matches,
+                key=lambda cluster: math.hypot(
+                    cluster.object_pose.x - object_pose.x,
+                    cluster.object_pose.y - object_pose.y,
+                ),
+            )
+
         nearest = None
         nearest_distance = float("inf")
         for cluster in self.active.values():
@@ -327,10 +357,58 @@ class MarkerManager:
                 if different_tracks or same_track
                 else self.association_radius_m
             )
-            if distance <= radius and distance < nearest_distance:
+            ray_match = (
+                different_tracks
+                and visible_track_ids is not None
+                and cluster.track_id not in visible_track_ids
+                and self._ray_matches_cluster(
+                    cluster.object_pose, object_pose, robot_pose
+                )
+            )
+            if (distance <= radius or ray_match) and distance < nearest_distance:
                 nearest = cluster
                 nearest_distance = distance
         return nearest
+
+    def _ray_matches_cluster(
+        self,
+        cluster_pose: ObjectPoseMap,
+        observed_pose: ObjectPoseMap,
+        robot_pose: Optional[RobotPoseMap],
+    ) -> bool:
+        if robot_pose is None:
+            return False
+        ray_x = observed_pose.x - robot_pose.x
+        ray_y = observed_pose.y - robot_pose.y
+        ray_length = math.hypot(ray_x, ray_y)
+        if ray_length <= 0.05:
+            return False
+        unit_x, unit_y = ray_x / ray_length, ray_y / ray_length
+        cluster_x = cluster_pose.x - robot_pose.x
+        cluster_y = cluster_pose.y - robot_pose.y
+        projection = cluster_x * unit_x + cluster_y * unit_y
+        if projection <= 0.05:
+            return False
+        perpendicular = abs(cluster_x * unit_y - cluster_y * unit_x)
+        return perpendicular <= self.track_reassociation_ray_tolerance_m
+
+    def _is_farther_distance_outlier(
+        self,
+        current_pose: ObjectPoseMap,
+        observed_pose: ObjectPoseMap,
+        robot_pose: Optional[RobotPoseMap],
+    ) -> bool:
+        if robot_pose is None:
+            return False
+        current_distance = math.hypot(
+            current_pose.x - robot_pose.x,
+            current_pose.y - robot_pose.y,
+        )
+        observed_distance = math.hypot(
+            observed_pose.x - robot_pose.x,
+            observed_pose.y - robot_pose.y,
+        )
+        return observed_distance > current_distance + self.max_far_jump_m
 
     def _merge_overlapping_clusters(
         self,
@@ -352,23 +430,45 @@ class MarkerManager:
                     and candidate.track_id is not None
                     and target.track_id != candidate.track_id
                 )
+                same_track = (
+                    target.track_id is not None
+                    and target.track_id == candidate.track_id
+                )
                 if different_tracks and (
                     visible_track_ids is None
                     or candidate.track_id in visible_track_ids
                 ):
                     continue
-                same_track = (
-                    target.track_id is not None
-                    and target.track_id == candidate.track_id
-                )
                 radius = (
                     self.track_reassociation_radius_m
                     if different_tracks or same_track
                     else self.association_radius_m
                 )
-                if distance > radius:
+                if not same_track and distance > radius:
                     continue
-                target.object_pose = self._blend_pose(target.object_pose, candidate.object_pose, new_weight=0.5)
+                if (
+                    same_track
+                    and target.robot_pose is not None
+                    and self._is_farther_distance_outlier(
+                        candidate.object_pose,
+                        target.object_pose,
+                        target.robot_pose,
+                    )
+                ):
+                    target.object_pose = candidate.object_pose
+                elif not (
+                    same_track
+                    and self._is_farther_distance_outlier(
+                        target.object_pose,
+                        candidate.object_pose,
+                        target.robot_pose,
+                    )
+                ):
+                    target.object_pose = self._blend_pose(
+                        target.object_pose,
+                        candidate.object_pose,
+                        new_weight=0.5,
+                    )
                 target.count += candidate.count
                 target.expires_at = max(target.expires_at, candidate.expires_at)
                 target.ttl_s = max(target.ttl_s, candidate.ttl_s)

@@ -36,6 +36,8 @@ cluster_merge_radius_m: 0.25
 marker_association_radius_m: 0.40
 reported_merge_radius_m: 1.00
 track_reassociation_radius_m: 1.00
+track_reassociation_ray_tolerance_m: 0.35
+marker_max_far_jump_m: 0.60
 anomaly_min_observations: 2
 anomaly_confirmation_ttl_s: 6.0
 marker_object_size_m: 0.20
@@ -59,6 +61,9 @@ depth_min_valid_pixels: 20
 depth_distance_percentile: 50.0
 depth_min_distance_m: 0.15
 depth_max_distance_m: 6.0
+depth_track_filter_enabled: true
+depth_track_max_far_jump_m: 0.60
+depth_track_filter_ttl_s: 3.0
 default_distance_uncertainty_m: 0.75
 use_laser_distance: true
 laser_window_deg: 6.0

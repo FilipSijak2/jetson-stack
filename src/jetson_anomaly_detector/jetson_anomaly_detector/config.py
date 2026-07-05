@@ -80,6 +80,8 @@ class AppConfig:
     marker_association_radius_m: float = 2.00
     reported_merge_radius_m: float = 2.00
     track_reassociation_radius_m: float = 1.00
+    track_reassociation_ray_tolerance_m: float = 0.35
+    marker_max_far_jump_m: float = 0.60
     anomaly_min_observations: int = 2
     anomaly_confirmation_ttl_s: float = 6.0
     marker_object_size_m: float = 0.20
@@ -102,6 +104,9 @@ class AppConfig:
     depth_distance_percentile: float = 50.0
     depth_min_distance_m: float = 0.15
     depth_max_distance_m: float = 6.0
+    depth_track_filter_enabled: bool = True
+    depth_track_max_far_jump_m: float = 0.60
+    depth_track_filter_ttl_s: float = 3.0
     default_distance_uncertainty_m: float = 0.75
     use_laser_distance: bool = True
     laser_window_deg: float = 6.0
@@ -221,6 +226,8 @@ ENV_OVERRIDES = {
     "marker_association_radius_m": ("MARKER_ASSOCIATION_RADIUS_M", _env_float),
     "reported_merge_radius_m": ("REPORTED_MERGE_RADIUS_M", _env_float),
     "track_reassociation_radius_m": ("TRACK_REASSOCIATION_RADIUS_M", _env_float),
+    "track_reassociation_ray_tolerance_m": ("TRACK_REASSOCIATION_RAY_TOLERANCE_M", _env_float),
+    "marker_max_far_jump_m": ("MARKER_MAX_FAR_JUMP_M", _env_float),
     "anomaly_min_observations": ("ANOMALY_MIN_OBSERVATIONS", _env_int),
     "anomaly_confirmation_ttl_s": ("ANOMALY_CONFIRMATION_TTL_S", _env_float),
     "marker_object_size_m": ("MARKER_OBJECT_SIZE_M", _env_float),
@@ -243,6 +250,9 @@ ENV_OVERRIDES = {
     "depth_distance_percentile": ("DEPTH_DISTANCE_PERCENTILE", _env_float),
     "depth_min_distance_m": ("DEPTH_MIN_DISTANCE_M", _env_float),
     "depth_max_distance_m": ("DEPTH_MAX_DISTANCE_M", _env_float),
+    "depth_track_filter_enabled": ("DEPTH_TRACK_FILTER_ENABLED", _env_bool),
+    "depth_track_max_far_jump_m": ("DEPTH_TRACK_MAX_FAR_JUMP_M", _env_float),
+    "depth_track_filter_ttl_s": ("DEPTH_TRACK_FILTER_TTL_S", _env_float),
     "default_distance_uncertainty_m": ("DEFAULT_DISTANCE_UNCERTAINTY_M", _env_float),
     "use_laser_distance": ("USE_LASER_DISTANCE", _env_bool),
     "laser_window_deg": ("LASER_WINDOW_DEG", _env_float),
@@ -483,6 +493,13 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
         normalized["marker_association_radius_m"],
         float(normalized.get("track_reassociation_radius_m", 1.00)),
     )
+    normalized["track_reassociation_ray_tolerance_m"] = max(
+        0.05,
+        float(normalized.get("track_reassociation_ray_tolerance_m", 0.35)),
+    )
+    normalized["marker_max_far_jump_m"] = max(
+        0.05, float(normalized.get("marker_max_far_jump_m", 0.60))
+    )
     normalized["anomaly_min_observations"] = max(1, int(normalized.get("anomaly_min_observations", 2)))
     normalized["anomaly_confirmation_ttl_s"] = max(
         0.1,
@@ -504,6 +521,12 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
     normalized["depth_max_distance_m"] = max(
         normalized["depth_min_distance_m"],
         float(normalized.get("depth_max_distance_m", 6.0)),
+    )
+    normalized["depth_track_max_far_jump_m"] = max(
+        0.05, float(normalized.get("depth_track_max_far_jump_m", 0.60))
+    )
+    normalized["depth_track_filter_ttl_s"] = max(
+        0.25, float(normalized.get("depth_track_filter_ttl_s", 3.0))
     )
     normalized["default_distance_uncertainty_m"] = max(
         0.0, float(normalized.get("default_distance_uncertainty_m", 0.75))

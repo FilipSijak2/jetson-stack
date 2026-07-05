@@ -86,6 +86,8 @@ CLUSTER_MERGE_RADIUS_M=0.25
 MARKER_ASSOCIATION_RADIUS_M=0.40
 REPORTED_MERGE_RADIUS_M=1.00
 TRACK_REASSOCIATION_RADIUS_M=1.00
+TRACK_REASSOCIATION_RAY_TOLERANCE_M=0.35
+MARKER_MAX_FAR_JUMP_M=0.60
 ANOMALY_MIN_OBSERVATIONS=2
 ANOMALY_CONFIRMATION_TTL_S=6.0
 SAVE_PER_EVENT_IMAGES=1
@@ -138,6 +140,11 @@ bottle and assigns it a new ID, the new track can reuse the previous marker and
 reported event within this radius. Different track IDs that are visible in the
 same frame remain separate, so nearby real bottles are not collapsed into one
 object. `REPORTED_MERGE_RADIUS_M` is the same-day event deduplication radius.
+The same track ID is always treated as one physical object, regardless of a
+single depth jump. `TRACK_REASSOCIATION_RAY_TOLERANCE_M` also reconnects a
+replacement ID when its estimated point lies farther away on the same camera
+ray. `MARKER_MAX_FAR_JUMP_M` prevents that farther measurement from moving the
+canonical map marker.
 
 When RealSense camera info and aligned depth are available, Jetson uses the
 camera intrinsic matrix to calculate the horizontal ray and depth to calculate

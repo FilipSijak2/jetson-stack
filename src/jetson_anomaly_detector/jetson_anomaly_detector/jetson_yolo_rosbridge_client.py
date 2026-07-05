@@ -86,6 +86,13 @@ class ReportedAnomaly:
     track_id: Optional[int] = None
 
 
+@dataclass
+class TrackDepthState:
+    estimate: DistanceEstimate
+    robot_pose: RobotPoseMap
+    last_seen: float
+
+
 @dataclass(frozen=True)
 class InspectionTarget:
     cluster_id: str
@@ -115,6 +122,7 @@ class InspectionCaptureState:
     best_score: float = -1.0
     best_image: Optional[np.ndarray] = None
     best_source_msg: Optional[Dict[str, Any]] = None
+    last_wait_log: float = 0.0
 
 
 class JetsonYoloRosbridgeClient:
@@ -171,6 +179,10 @@ class JetsonYoloRosbridgeClient:
             text_compact=config.marker_text_compact,
             tracked_object_min_separation_m=config.tracked_object_min_separation_m,
             track_reassociation_radius_m=config.track_reassociation_radius_m,
+            track_reassociation_ray_tolerance_m=(
+                config.track_reassociation_ray_tolerance_m
+            ),
+            max_far_jump_m=config.marker_max_far_jump_m,
             ray_enabled=config.marker_ray_enabled,
             ray_ttl_s=config.marker_ray_ttl_s,
             uncertainty_enabled=config.marker_uncertainty_enabled,
@@ -181,10 +193,13 @@ class JetsonYoloRosbridgeClient:
         )
         self.rosbridge = RosbridgeClient(config.rosbridge_url, LOGGER)
         self.latest_map: Optional[OccupancyGridMap] = None
+        self.daily_map_initialized = False
         self.latest_pose: Optional[RobotPoseMap] = None
         self.latest_scan: Optional[LaserScan] = None
         self.camera_intrinsics: Optional[CameraIntrinsics] = None
         self.depth_buffer = deque(maxlen=config.depth_buffer_size)
+        self.track_depth_states: Dict[tuple[str, int], TrackDepthState] = {}
+        self.last_depth_outlier_log: Dict[tuple[str, int], float] = {}
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
         self.reported_anomalies: List[ReportedAnomaly] = []
@@ -345,6 +360,7 @@ class JetsonYoloRosbridgeClient:
             payload = self.rosbridge.recv_json()
             if payload is not None:
                 self._handle_rosbridge_payload(payload)
+            self._expire_inspection_capture_if_due()
             self._publish_markers_if_due()
 
     def _handle_rosbridge_payload(self, payload: Dict[str, Any]) -> None:
@@ -379,6 +395,16 @@ class JetsonYoloRosbridgeClient:
             self.latest_map = parse_occupancy_grid(msg)
         except Exception as exc:
             LOGGER.warning("Failed to parse OccupancyGrid: %s", exc)
+            return
+        if not self.daily_map_initialized:
+            refreshed = self._refresh_daily_map_summary(msg, force=True)
+            if refreshed is not None:
+                self.daily_map_initialized = True
+                LOGGER.info(
+                    "Daily map rebuilt from %d consolidated anomaly location(s): %s",
+                    len(self.reported_anomalies),
+                    refreshed[0],
+                )
 
     def _on_pose(self, msg: Dict[str, Any]) -> None:
         try:
@@ -676,6 +702,13 @@ class JetsonYoloRosbridgeClient:
                 deadline=time.monotonic()
                 + self.config.inspection_capture_timeout_s,
             )
+            LOGGER.info(
+                "Inspection %s capture armed targets=%d frames=%d timeout=%.1fs",
+                request_id,
+                len(metadata["targets"]),
+                self.config.inspection_capture_frames,
+                self.config.inspection_capture_timeout_s,
+            )
             return
 
         if state in {"rejected", "failed", "canceled", "timeout", "capture_failed"}:
@@ -702,6 +735,11 @@ class JetsonYoloRosbridgeClient:
                 "Inspection %s expired without a terminal coordinator status",
                 request_id,
             )
+
+    def _expire_inspection_capture_if_due(self) -> None:
+        capture = self.inspection_capture
+        if capture is not None and time.monotonic() >= capture.deadline:
+            self._finish_inspection_capture(False, "capture_timeout")
 
     def _defer_inspection_retry(
         self,
@@ -732,6 +770,26 @@ class JetsonYoloRosbridgeClient:
             capture, detections, frame.shape[1], frame.shape[0], source_msg
         )
         if not selected:
+            now = time.monotonic()
+            if now - capture.last_wait_log >= 2.0:
+                matching = [
+                    detection
+                    for detection in detections
+                    if any(
+                        detection.label == target.label
+                        for target in capture.targets
+                    )
+                ]
+                LOGGER.info(
+                    "Inspection %s waiting for target detections=%d "
+                    "matching_labels=%d target_tracks=%s observed_tracks=%s",
+                    capture.request_id,
+                    len(detections),
+                    len(matching),
+                    [target.track_id for target in capture.targets],
+                    [detection.track_id for detection in matching],
+                )
+                capture.last_wait_log = now
             return
         privacy_frame = blur_except_detections(
             frame,
@@ -812,7 +870,7 @@ class JetsonYoloRosbridgeClient:
                     located.object_pose, target.object_pose
                 )
                 if (
-                    distance <= self.config.marker_association_radius_m
+                    distance <= self.config.track_reassociation_radius_m
                     and distance < nearest_distance
                 ):
                     nearest = candidate
@@ -951,6 +1009,12 @@ class JetsonYoloRosbridgeClient:
         for inspected in self.inspected_locations:
             if inspected.label != label:
                 continue
+            if (
+                track_id is not None
+                and inspected.track_id is not None
+                and track_id == inspected.track_id
+            ):
+                return True
             distance = _distance_xy(inspected.object_pose, object_pose)
             different_tracks = (
                 track_id is not None
@@ -1033,6 +1097,7 @@ class JetsonYoloRosbridgeClient:
         self.inspection_candidate_buffer.clear()
         self.inspection_collection_deadline = 0.0
         self.next_daily_summary_refresh = 0.0
+        self.daily_map_initialized = False
         self._clear_existing_markers()
         self.markers.reset()
         LOGGER.info(
@@ -1076,7 +1141,10 @@ class JetsonYoloRosbridgeClient:
             detection_stage_ms=(inference_finished - frame_started) * 1000.0,
         )
         self._expire_stale_inspection_request()
-        self._capture_inspection_frame_if_active(anomalies, frame, msg)
+        # Capture accepts the detector/tracker confidence floor (normally
+        # 0.25), while anomaly events retain the stricter event threshold.
+        # Close-up confidence may temporarily fall after the robot approaches.
+        self._capture_inspection_frame_if_active(detections, frame, msg)
         self._publish_debug_stream_if_due(anomalies, frame, msg)
         self._publish_privacy_stream_if_due(anomalies, frame, msg)
         self._publish_detection_3d_if_due(anomalies, frame, msg)
@@ -1116,8 +1184,15 @@ class JetsonYoloRosbridgeClient:
                 visible_track_ids=visible_track_ids,
             )
             self.daily_clusters[cluster.cluster_id] = cluster
+            inspection_group = DetectionGroup(
+                label=confirmed_group.label,
+                detections=confirmed_group.detections,
+                object_pose=cluster.object_pose,
+                distance_estimate=confirmed_group.distance_estimate,
+                bearing_source=confirmed_group.bearing_source,
+            )
             inspection_candidates.append(
-                InspectionCandidate(confirmed_group, cluster)
+                InspectionCandidate(inspection_group, cluster)
             )
             track_id = _best_track_id(confirmed_group.detections)
             if self._already_reported(
@@ -1215,6 +1290,9 @@ class JetsonYoloRosbridgeClient:
         distance_estimate = self._distance_for_detection(
             detection, image_width, image_height, source_msg
         )
+        distance_estimate = self._stabilize_track_depth(
+            detection, distance_estimate, robot_pose
+        )
         intrinsics = self.camera_intrinsics if self.config.use_camera_intrinsics else None
         object_pose = estimate_object_pose_map(
             robot_pose=robot_pose,
@@ -1250,6 +1328,82 @@ class JetsonYoloRosbridgeClient:
             distance_estimate=distance_estimate,
             bearing_source="camera_intrinsics" if intrinsics is not None else "horizontal_fov",
         )
+
+    def _stabilize_track_depth(
+        self,
+        detection: Detection,
+        estimate: DistanceEstimate,
+        robot_pose: RobotPoseMap,
+    ) -> DistanceEstimate:
+        if (
+            not self.config.depth_track_filter_enabled
+            or estimate.source != "depth"
+            or detection.track_id is None
+        ):
+            return estimate
+
+        now = time.monotonic()
+        key = (detection.label, int(detection.track_id))
+        if len(self.track_depth_states) >= 256:
+            ttl = self.config.depth_track_filter_ttl_s
+            self.track_depth_states = {
+                state_key: state
+                for state_key, state in self.track_depth_states.items()
+                if now - state.last_seen <= ttl
+            }
+            self.last_depth_outlier_log = {
+                state_key: logged_at
+                for state_key, logged_at in self.last_depth_outlier_log.items()
+                if state_key in self.track_depth_states
+            }
+        state = self.track_depth_states.get(key)
+        if (
+            state is None
+            or now - state.last_seen > self.config.depth_track_filter_ttl_s
+        ):
+            self.track_depth_states[key] = TrackDepthState(
+                estimate, robot_pose, now
+            )
+            return estimate
+
+        robot_motion = float(
+            np.hypot(
+                robot_pose.x - state.robot_pose.x,
+                robot_pose.y - state.robot_pose.y,
+            )
+        )
+        allowed_far_jump = (
+            self.config.depth_track_max_far_jump_m + robot_motion
+        )
+        if estimate.distance_m - state.estimate.distance_m > allowed_far_jump:
+            last_log = self.last_depth_outlier_log.get(key, 0.0)
+            if now - last_log >= 2.0:
+                LOGGER.info(
+                    "Rejected depth outlier label=%s track_id=%d "
+                    "previous=%.2fm measured=%.2fm robot_motion=%.2fm",
+                    detection.label,
+                    detection.track_id,
+                    state.estimate.distance_m,
+                    estimate.distance_m,
+                    robot_motion,
+                )
+                self.last_depth_outlier_log[key] = now
+            state.last_seen = now
+            return DistanceEstimate(
+                distance_m=state.estimate.distance_m,
+                source="depth",
+                uncertainty_m=max(
+                    float(state.estimate.uncertainty_m or 0.0),
+                    float(estimate.uncertainty_m or 0.0),
+                ),
+                valid_sample_count=state.estimate.valid_sample_count,
+                age_s=estimate.age_s,
+            )
+
+        self.track_depth_states[key] = TrackDepthState(
+            estimate, robot_pose, now
+        )
+        return estimate
 
     def _group_located_detections(self, located: List[LocatedDetection]) -> List[DetectionGroup]:
         groups: List[List[LocatedDetection]] = []
@@ -1393,8 +1547,6 @@ class JetsonYoloRosbridgeClient:
                 if (
                     pending.label == label
                     and pending.track_id == track_id
-                    and _distance_xy(pending.object_pose, object_pose)
-                    <= self.config.track_reassociation_radius_m
                 ):
                     return index
         nearest_index = None
@@ -1472,6 +1624,12 @@ class JetsonYoloRosbridgeClient:
         for index, reported in enumerate(self.reported_anomalies):
             if reported.label != label:
                 continue
+            if (
+                track_id is not None
+                and reported.track_id is not None
+                and track_id == reported.track_id
+            ):
+                return index
             distance = _distance_xy(reported.object_pose, object_pose)
             different_tracks = (
                 track_id is not None
