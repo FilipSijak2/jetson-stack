@@ -98,7 +98,7 @@ debug_image_on_detection: true
 debug_image_publish_hz: 2.0
 privacy_image_enabled: true
 privacy_image_publish_hz: 2.0
-privacy_blur_kernel_size: 51
+privacy_blur_kernel_size: 101
 privacy_bbox_padding_ratio: 0.03
 privacy_use_segmentation_masks: true
 privacy_draw_track_id: true
