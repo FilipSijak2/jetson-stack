@@ -93,6 +93,7 @@ ANOMALY_CONFIRMATION_TTL_S=6.0
 SAVE_PER_EVENT_IMAGES=1
 SAVE_ANNOTATED_PRIVACY_BLUR=1
 SAVE_DOCUMENTATION_IMAGES=1
+SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1
 DAILY_MAP_SUMMARY=1
 DEBUG_IMAGE_ALWAYS_STREAM=1
 DEBUG_IMAGE_ON_DETECTION=1
@@ -415,6 +416,12 @@ Jetson writes:
   segmented object visible before drawing its bounding box. Complete sets are
   also assembled automatically as a labeled 2-by-2 figure named
   `05_documentation_composite.png` for direct use in reports.
+- three-frame tracking documentation sequences in the same directory. When
+  `SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1`, the first three consecutive
+  inference frames for each segmented track are assembled horizontally as
+  `tracking_<label>_track_<id>_<timestamp>_three_frame_sequence.png`. Every
+  panel uses the privacy background and shows the segmentation mask,
+  confidence, estimated distance, and distance source.
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`

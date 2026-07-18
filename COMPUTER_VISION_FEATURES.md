@@ -196,6 +196,38 @@ Privacy RGB prikaz koristi iste postavke kao privacy stream:
 `privacy_use_segmentation_masks`. U aktivnoj konfiguraciji segmentacijska maska
 određuje jedino područje koje ostaje nezamućeno.
 
+### Slika segmentacije i trackinga kroz tri framea
+
+Postavka:
+
+```yaml
+save_tracking_documentation_sequence: true
+```
+
+odnosno:
+
+```text
+SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1
+```
+
+automatski sprema jedan vodoravni niz od tri uzastopna inferencijska framea za
+svaki `track_id`. Svaki panel prikazuje privacy RGB pozadinu, zelenu
+segmentacijsku masku i konturu, bounding box, confidence, procijenjenu
+udaljenost i njezin izvor (`depth`, `laser` ili `default`). Paneli su označeni
+kao `(a) Frame t-2`, `(b) Frame t-1` i `(c) Frame t`.
+
+Datoteka se sprema u
+`/home/jetson/anomaly_logs/images/documentation/` pod nazivom poput:
+
+```text
+tracking_bottle_track_7_20260719_143025_418_three_frame_sequence.png
+```
+
+Sekvenca se izrađuje samo kada sva tri framea imaju isti track ID i
+segmentacijsku masku. Ako objekt nedostaje u jednom obrađenom frameu, povijest
+tog tracka počinje ispočetka. Za svaki track tijekom jednog pokretanja procesa
+sprema se samo prvi potpuni primjer kako se ne bi nepotrebno punio disk.
+
 ## Privacy topic
 
 Topic:

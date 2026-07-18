@@ -94,6 +94,12 @@ class TrackDepthState:
 
 
 @dataclass(frozen=True)
+class TrackingDocumentationSample:
+    frame_number: int
+    image: np.ndarray
+
+
+@dataclass(frozen=True)
 class InspectionTarget:
     cluster_id: str
     label: str
@@ -142,7 +148,10 @@ class JetsonYoloRosbridgeClient:
         paths = [self.map_dir, self.daily_map_dir]
         if config.save_per_event_images:
             paths.extend([self.original_dir, self.annotated_dir])
-        if config.save_documentation_images:
+        if (
+            config.save_documentation_images
+            or config.save_tracking_documentation_sequence
+        ):
             paths.append(self.documentation_dir)
         if config.inspection_enabled:
             paths.append(self.inspection_dir)
@@ -203,6 +212,10 @@ class JetsonYoloRosbridgeClient:
         self.depth_buffer = deque(maxlen=config.depth_buffer_size)
         self.track_depth_states: Dict[tuple[str, int], TrackDepthState] = {}
         self.last_depth_outlier_log: Dict[tuple[str, int], float] = {}
+        self.tracking_documentation_history: Dict[
+            tuple[str, int], deque[TrackingDocumentationSample]
+        ] = {}
+        self.documented_tracking_keys: set[tuple[str, int]] = set()
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
         self.reported_anomalies: List[ReportedAnomaly] = []
@@ -1162,6 +1175,7 @@ class JetsonYoloRosbridgeClient:
             self._locate_detection(detection, frame.shape[1], frame.shape[0], msg)
             for detection in anomalies
         ]
+        self._record_tracking_documentation_sequence(located, frame)
         inspection_candidates: List[InspectionCandidate] = []
         groups = self._group_located_detections(located)
         visible_track_ids = {
@@ -1904,6 +1918,86 @@ class JetsonYoloRosbridgeClient:
             )
         return paths
 
+    def _record_tracking_documentation_sequence(
+        self,
+        located: List[LocatedDetection],
+        frame: np.ndarray,
+    ) -> None:
+        if not self.config.save_tracking_documentation_sequence:
+            return
+
+        expected_frame_delta = max(1, int(self.config.inference_every_n_frames))
+        visible_keys: set[tuple[str, int]] = set()
+        for item in located:
+            detection = item.detection
+            if detection.track_id is None or detection.mask is None:
+                continue
+            key = (detection.label, int(detection.track_id))
+            visible_keys.add(key)
+            if key in self.documented_tracking_keys:
+                continue
+
+            history = self.tracking_documentation_history.setdefault(
+                key,
+                deque(maxlen=3),
+            )
+            if (
+                history
+                and self.frame_count - history[-1].frame_number
+                != expected_frame_delta
+            ):
+                history.clear()
+
+            annotated = build_tracking_documentation_frame(
+                frame=frame,
+                detection=detection,
+                distance_estimate=item.distance_estimate,
+                privacy_blur_kernel_size=self.config.privacy_blur_kernel_size,
+                privacy_bbox_padding_ratio=self.config.privacy_bbox_padding_ratio,
+                privacy_use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+                privacy_mask_overlay_alpha=self.config.privacy_mask_overlay_alpha,
+            )
+            history.append(
+                TrackingDocumentationSample(
+                    frame_number=self.frame_count,
+                    image=annotated,
+                )
+            )
+            if len(history) < 3:
+                continue
+
+            composite = build_tracking_sequence_composite(
+                [sample.image for sample in history],
+                track_id=int(detection.track_id),
+            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            path = self.documentation_dir / (
+                f"tracking_{_slug(detection.label)}_track_{int(detection.track_id)}_"
+                f"{timestamp}_three_frame_sequence.png"
+            )
+            try:
+                _write_image(path, composite)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Could not save tracking documentation sequence for %s: %s",
+                    key,
+                    exc,
+                )
+                continue
+            self.documented_tracking_keys.add(key)
+            self.tracking_documentation_history.pop(key, None)
+            LOGGER.info(
+                "Saved three-frame tracking documentation sequence for "
+                "label=%s track_id=%d to %s",
+                detection.label,
+                detection.track_id,
+                path,
+            )
+
+        for key in list(self.tracking_documentation_history):
+            if key not in visible_keys:
+                self.tracking_documentation_history.pop(key, None)
+
     def _distance_for_detection(
         self,
         detection: Detection,
@@ -2402,6 +2496,163 @@ def build_event_annotated_frame(
         else frame.copy()
     )
     return annotate_frame(base, detections)
+
+
+def build_tracking_documentation_frame(
+    *,
+    frame: np.ndarray,
+    detection: Detection,
+    distance_estimate: DistanceEstimate,
+    privacy_blur_kernel_size: int,
+    privacy_bbox_padding_ratio: float,
+    privacy_use_segmentation_masks: bool,
+    privacy_mask_overlay_alpha: float,
+) -> np.ndarray:
+    """Create one privacy-safe tracking panel with mask and measurements."""
+    privacy_frame = blur_except_detections(
+        frame,
+        [detection],
+        kernel_size=privacy_blur_kernel_size,
+        padding_ratio=privacy_bbox_padding_ratio,
+        use_segmentation_masks=privacy_use_segmentation_masks,
+        draw_track_id=False,
+        draw_mask_overlay=True,
+        mask_overlay_alpha=privacy_mask_overlay_alpha,
+    )
+    bbox_only = Detection(
+        label=detection.label,
+        confidence=detection.confidence,
+        bbox_xyxy=list(detection.bbox_xyxy),
+        track_id=detection.track_id,
+        mask=None,
+    )
+    output = annotate_frame(privacy_frame, [bbox_only])
+    height, width = output.shape[:2]
+    track_text = (
+        str(detection.track_id) if detection.track_id is not None else "-"
+    )
+    info = (
+        f"track ID={track_text}  confidence={detection.confidence:.2f}  "
+        f"udaljenost={distance_estimate.distance_m:.2f} m  "
+        f"izvor={distance_estimate.source}"
+    )
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.38, min(0.75, width / 1000.0))
+    thickness = max(1, int(round(width / 800.0)))
+    available_width = max(1, width - 16)
+    (text_width, text_height), baseline = cv2.getTextSize(
+        info,
+        font,
+        font_scale,
+        thickness,
+    )
+    if text_width > available_width:
+        font_scale = max(0.28, font_scale * available_width / text_width)
+        (text_width, text_height), baseline = cv2.getTextSize(
+            info,
+            font,
+            font_scale,
+            thickness,
+        )
+    bar_height = min(height, text_height + baseline + 14)
+    cv2.rectangle(
+        output,
+        (0, max(0, height - bar_height)),
+        (width - 1, height - 1),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(
+        output,
+        info,
+        (8, max(text_height + 2, height - baseline - 7)),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    return output
+
+
+def build_tracking_sequence_composite(
+    frames: List[np.ndarray],
+    *,
+    track_id: int,
+) -> np.ndarray:
+    """Join three consecutive tracking views into one labeled horizontal image."""
+    if len(frames) != 3 or any(frame.size == 0 for frame in frames):
+        raise ValueError("Tracking documentation requires exactly three frames")
+
+    source_height, source_width = frames[0].shape[:2]
+    if source_height <= 0 or source_width <= 0:
+        raise ValueError("Tracking documentation frames must not be empty")
+    panel_width = min(640, source_width)
+    panel_height = max(1, int(round(source_height * panel_width / source_width)))
+    gap = max(6, int(round(panel_width * 0.015)))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.45, min(0.75, panel_width / 900.0))
+    thickness = max(1, int(round(panel_width / 640.0)))
+    labels = (
+        f"(a) Frame t-2, track ID={track_id}",
+        f"(b) Frame t-1, track ID={track_id}",
+        f"(c) Frame t, track ID={track_id}",
+    )
+    text_sizes = [
+        cv2.getTextSize(label, font, font_scale, thickness)
+        for label in labels
+    ]
+    header_height = max(
+        34,
+        max(size[0][1] + size[1] for size in text_sizes) + 16,
+    )
+    canvas = np.full(
+        (
+            header_height + panel_height,
+            panel_width * 3 + gap * 2,
+            3,
+        ),
+        255,
+        dtype=np.uint8,
+    )
+
+    for index, (frame, label, text_size) in enumerate(
+        zip(frames, labels, text_sizes)
+    ):
+        panel = frame
+        if panel.ndim == 2:
+            panel = cv2.cvtColor(panel, cv2.COLOR_GRAY2BGR)
+        elif panel.ndim == 3 and panel.shape[2] == 4:
+            panel = cv2.cvtColor(panel, cv2.COLOR_BGRA2BGR)
+        if panel.shape[:2] != (panel_height, panel_width):
+            panel = cv2.resize(
+                panel,
+                (panel_width, panel_height),
+                interpolation=cv2.INTER_AREA,
+            )
+        x = index * (panel_width + gap)
+        canvas[header_height:, x : x + panel_width] = panel
+        label_width, label_height = text_size[0]
+        text_x = x + max(6, (panel_width - label_width) // 2)
+        text_y = max(label_height + 4, (header_height + label_height) // 2)
+        cv2.putText(
+            canvas,
+            label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (20, 20, 20),
+            thickness,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(
+            canvas,
+            (x, 0),
+            (x + panel_width - 1, header_height + panel_height - 1),
+            (160, 160, 160),
+            max(1, thickness),
+        )
+    return canvas
 
 
 def build_documentation_images(

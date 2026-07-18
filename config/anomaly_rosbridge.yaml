@@ -92,6 +92,7 @@ jpeg_quality: 85
 save_per_event_images: true
 save_annotated_privacy_blur: true
 save_documentation_images: true
+save_tracking_documentation_sequence: true
 daily_map_summary: true
 daily_map_summary_topic_publish: true
 debug_image_always_stream: true

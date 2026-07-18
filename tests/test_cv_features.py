@@ -16,6 +16,7 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     InspectionCaptureState,
     InspectionTarget,
     JetsonYoloRosbridgeClient,
+    LocatedDetection,
     ReportedAnomaly,
     _detection_sharpness,
     _group_inspection_candidates,
@@ -25,6 +26,8 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     build_documentation_composite,
     build_documentation_images,
     build_event_annotated_frame,
+    build_tracking_documentation_frame,
+    build_tracking_sequence_composite,
 )
 from jetson_anomaly_detector.event_schema import build_event
 from jetson_anomaly_detector.localization import (
@@ -270,6 +273,102 @@ class TrackingAndSegmentationTest(unittest.TestCase):
 
         self.assertEqual(set(images), {"rgb_bbox"})
         self.assertIsNone(build_documentation_composite(images))
+
+    def test_saves_one_three_frame_tracking_sequence_per_track(self) -> None:
+        yy, xx = np.indices((90, 120))
+        checker = ((xx + yy) % 2 * 255).astype(np.uint8)
+        frame = np.dstack((checker, checker, np.roll(checker, 1, axis=1)))
+        mask = np.zeros((90, 120), dtype=bool)
+        mask[20:75, 35:85] = True
+        detection = Detection(
+            "bottle",
+            0.91,
+            [30, 15, 90, 80],
+            track_id=7,
+            mask=mask,
+        )
+        located = [
+            LocatedDetection(
+                detection=detection,
+                object_pose=ObjectPoseMap(1.0, 2.0, 0.0),
+                distance_estimate=DistanceEstimate(1.25, "depth"),
+                bearing_source="camera_intrinsics",
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = JetsonYoloRosbridgeClient.__new__(
+                JetsonYoloRosbridgeClient
+            )
+            client.config = SimpleNamespace(
+                save_tracking_documentation_sequence=True,
+                inference_every_n_frames=1,
+                privacy_blur_kernel_size=11,
+                privacy_bbox_padding_ratio=0.0,
+                privacy_use_segmentation_masks=True,
+                privacy_mask_overlay_alpha=0.25,
+            )
+            client.documentation_dir = Path(temp_dir)
+            client.tracking_documentation_history = {}
+            client.documented_tracking_keys = set()
+
+            for frame_number in (1, 2):
+                client.frame_count = frame_number
+                client._record_tracking_documentation_sequence(located, frame)
+                self.assertEqual(
+                    list(Path(temp_dir).glob("*three_frame_sequence.png")),
+                    [],
+                )
+
+            client.frame_count = 3
+            client._record_tracking_documentation_sequence(located, frame)
+            saved = list(Path(temp_dir).glob("*three_frame_sequence.png"))
+            self.assertEqual(len(saved), 1)
+            composite = cv2.imread(str(saved[0]), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(composite)
+            assert composite is not None
+            self.assertGreater(composite.shape[1], frame.shape[1] * 3)
+
+            client.frame_count = 4
+            client._record_tracking_documentation_sequence(located, frame)
+            self.assertEqual(
+                len(list(Path(temp_dir).glob("*three_frame_sequence.png"))),
+                1,
+            )
+
+    def test_tracking_documentation_frame_contains_privacy_mask_and_metadata(self) -> None:
+        yy, xx = np.indices((100, 140))
+        pattern = ((xx + yy) % 2 * 255).astype(np.uint8)
+        frame = np.dstack((pattern, pattern, pattern))
+        mask = np.zeros((100, 140), dtype=bool)
+        mask[25:80, 45:95] = True
+        detection = Detection(
+            "bottle",
+            0.88,
+            [40, 20, 100, 85],
+            track_id=12,
+            mask=mask,
+        )
+        panel = build_tracking_documentation_frame(
+            frame=frame,
+            detection=detection,
+            distance_estimate=DistanceEstimate(1.4, "depth"),
+            privacy_blur_kernel_size=11,
+            privacy_bbox_padding_ratio=0.0,
+            privacy_use_segmentation_masks=True,
+            privacy_mask_overlay_alpha=0.25,
+        )
+        self.assertEqual(panel.shape, frame.shape)
+        self.assertFalse(np.array_equal(panel[5:15, 5:20], frame[5:15, 5:20]))
+        self.assertTrue(np.any(panel[35:70, 55:85, 1] > frame[35:70, 55:85, 1]))
+        self.assertTrue(np.all(panel[-3:, 10:30] == 0))
+
+        composite = build_tracking_sequence_composite(
+            [panel, panel, panel],
+            track_id=12,
+        )
+        self.assertEqual(composite.shape[2], 3)
+        self.assertGreater(composite.shape[1], panel.shape[1] * 3)
 
     def test_depth_filter_rejects_far_jump_and_accepts_closer_value(self) -> None:
         client = JetsonYoloRosbridgeClient.__new__(
