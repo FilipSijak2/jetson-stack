@@ -22,6 +22,7 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     _local_day_key,
     _target_center,
     blur_except_detections,
+    build_documentation_images,
     build_event_annotated_frame,
 )
 from jetson_anomaly_detector.event_schema import build_event
@@ -189,6 +190,79 @@ class TrackingAndSegmentationTest(unittest.TestCase):
         assert measurement is not None
         self.assertAlmostEqual(measurement.distance_m, 2.0)
 
+    def test_builds_four_synchronized_documentation_images(self) -> None:
+        yy, xx = np.indices((100, 120))
+        checker = ((xx + yy) % 2 * 255).astype(np.uint8)
+        frame = np.dstack((checker, np.roll(checker, 1, axis=0), checker))
+        mask = np.zeros((100, 120), dtype=bool)
+        mask[25:80, 35:85] = True
+        depth = np.full((100, 120), np.nan, dtype=np.float32)
+        depth[25:80, 35:85] = 1.25
+        detection = Detection(
+            "bottle",
+            0.93,
+            [30, 20, 90, 85],
+            track_id=7,
+            mask=mask,
+        )
+
+        images = build_documentation_images(
+            frame=frame,
+            detection=detection,
+            depth_image=depth,
+            privacy_blur_kernel_size=11,
+            privacy_bbox_padding_ratio=0.0,
+            privacy_use_segmentation_masks=True,
+            mask_erode_px=2,
+            roi_scale=0.60,
+            min_distance_m=0.15,
+            max_distance_m=6.0,
+        )
+
+        self.assertEqual(
+            set(images),
+            {"rgb_bbox", "mask_raw", "mask_eroded", "depth_colormap"},
+        )
+        self.assertEqual(images["rgb_bbox"].shape, frame.shape)
+        self.assertEqual(images["mask_raw"].shape, frame.shape[:2])
+        self.assertEqual(images["mask_eroded"].shape, frame.shape[:2])
+        self.assertEqual(images["depth_colormap"].shape, frame.shape)
+        self.assertGreater(
+            np.count_nonzero(images["mask_raw"]),
+            np.count_nonzero(images["mask_eroded"]),
+        )
+        self.assertTrue(np.any(images["depth_colormap"][45:65, 50:70] > 0))
+        self.assertTrue(np.all(images["depth_colormap"][90:99, 100:115] == 0))
+        np.testing.assert_array_equal(
+            images["rgb_bbox"][45:65, 50:70],
+            frame[45:65, 50:70],
+        )
+        self.assertFalse(
+            np.array_equal(
+                images["rgb_bbox"][85:95, 95:110],
+                frame[85:95, 95:110],
+            )
+        )
+
+    def test_documentation_images_degrade_cleanly_without_mask_or_depth(self) -> None:
+        frame = np.zeros((60, 80, 3), dtype=np.uint8)
+        detection = Detection("bottle", 0.8, [10, 10, 40, 50])
+
+        images = build_documentation_images(
+            frame=frame,
+            detection=detection,
+            depth_image=None,
+            privacy_blur_kernel_size=11,
+            privacy_bbox_padding_ratio=0.0,
+            privacy_use_segmentation_masks=True,
+            mask_erode_px=2,
+            roi_scale=0.60,
+            min_distance_m=0.15,
+            max_distance_m=6.0,
+        )
+
+        self.assertEqual(set(images), {"rgb_bbox"})
+
     def test_depth_filter_rejects_far_jump_and_accepts_closer_value(self) -> None:
         client = JetsonYoloRosbridgeClient.__new__(
             JetsonYoloRosbridgeClient
@@ -243,10 +317,17 @@ class TrackingAndSegmentationTest(unittest.TestCase):
             map_snapshot=None,
             daily_map_summary=None,
             event_log=Path("events.jsonl"),
+            documentation_images={
+                "rgb_bbox": Path("images/documentation/anom_00001_rgb.jpg")
+            },
         )
         self.assertEqual(event["track_id"], 12)
         self.assertTrue(event["segmentation_mask_used"])
         self.assertNotIn("mask", event)
+        self.assertEqual(
+            event["jetson_files"]["documentation_images"]["rgb_bbox"],
+            "images/documentation/anom_00001_rgb.jpg",
+        )
 
     def test_deprojects_segmented_depth_to_3d_bounds(self) -> None:
         depth = np.full((100, 100), 2.0, dtype=np.float32)

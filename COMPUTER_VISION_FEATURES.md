@@ -157,6 +157,41 @@ Maska ima dvije funkcije:
 `segmentation_depth_mask_erode_px` sužava masku prije čitanja dubine i smanjuje
 utjecaj rubnih piksela i pozadine. Vrijednost `0` isključuje eroziju.
 
+## Slike za dokumentaciju
+
+Postavka:
+
+```yaml
+save_documentation_images: true
+```
+
+odnosno environment varijabla:
+
+```text
+SAVE_DOCUMENTATION_IMAGES=1
+```
+
+za svaki potvrđeni događaj sprema sinkronizirani skup u
+`/home/jetson/anomaly_logs/images/documentation/`:
+
+1. privacy RGB kadar s bounding boxom: pozadina je zamućena, a segmentirani
+   objekt ostaje vidljiv bez obojenog mask overlayja
+2. izvornu binarnu segmentacijsku masku
+3. masku erodiranu prema `segmentation_depth_mask_erode_px`
+4. valjane aligned-depth piksele unutar erodirane maske i središnjeg ROI-ja,
+   obojene TURBO paletom (bliže crveno, dalje plavo)
+
+Datoteke istog događaja dijele prefiks, primjerice
+`anom_00042_bottle_01_rgb_bbox.jpg` do
+`anom_00042_bottle_04_depth_colormap.png`. Ako maska ili vremenski usklađen
+depth kadar nisu dostupni, spremaju se dostupni prikazi i u log se upisuje koji
+prikazi nedostaju.
+
+Privacy RGB prikaz koristi iste postavke kao privacy stream:
+`privacy_blur_kernel_size`, `privacy_bbox_padding_ratio` i
+`privacy_use_segmentation_masks`. U aktivnoj konfiguraciji segmentacijska maska
+određuje jedino područje koje ostaje nezamućeno.
+
 ## Privacy topic
 
 Topic:

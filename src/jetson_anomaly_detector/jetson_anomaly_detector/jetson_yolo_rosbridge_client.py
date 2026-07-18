@@ -131,6 +131,7 @@ class JetsonYoloRosbridgeClient:
         self.artifact_root = Path(config.artifact_root)
         self.original_dir = self.artifact_root / "images" / "original"
         self.annotated_dir = self.artifact_root / "images" / "annotated"
+        self.documentation_dir = self.artifact_root / "images" / "documentation"
         self.map_dir = self.artifact_root / "map_images"
         self.daily_map_dir = self.map_dir / "daily"
         self.inspection_dir = self.artifact_root / "images" / "inspection"
@@ -141,6 +142,8 @@ class JetsonYoloRosbridgeClient:
         paths = [self.map_dir, self.daily_map_dir]
         if config.save_per_event_images:
             paths.extend([self.original_dir, self.annotated_dir])
+        if config.save_documentation_images:
+            paths.append(self.documentation_dir)
         if config.inspection_enabled:
             paths.append(self.inspection_dir)
         if config.evaluation_metrics_enabled:
@@ -1752,6 +1755,7 @@ class JetsonYoloRosbridgeClient:
         label_slug = _slug(detection.label)
         original_path: Optional[Path] = None
         annotated_path: Optional[Path] = None
+        documentation_paths: Dict[str, Path] = {}
 
         robot_pose = self.latest_pose
         if robot_pose is None:
@@ -1770,6 +1774,15 @@ class JetsonYoloRosbridgeClient:
             )
             _write_image(original_path, frame)
             _write_image(annotated_path, annotated)
+
+        if self.config.save_documentation_images:
+            documentation_paths = self._save_documentation_images(
+                event_id=event_id,
+                label_slug=label_slug,
+                frame=frame,
+                detection=detection,
+                source_msg=source_msg,
+            )
 
         snapshot_path: Optional[Path] = None
         refreshed_summary = self._refresh_daily_map_summary(
@@ -1800,6 +1813,7 @@ class JetsonYoloRosbridgeClient:
             map_snapshot=snapshot_path,
             daily_map_summary=snapshot_path,
             event_log=self.event_log_path,
+            documentation_images=documentation_paths,
         )
         self.event_writer.append(event)
         self._remember_reported(
@@ -1812,7 +1826,7 @@ class JetsonYoloRosbridgeClient:
         self._mark_cooldown(group.label, cluster.object_pose)
         LOGGER.info(
             "Anomaly %s label=%s confidence=%.2f cluster=%s count=%d "
-            "original=%s annotated=%s daily_map=%s",
+            "original=%s annotated=%s documentation=%s daily_map=%s",
             event_id,
             detection.label,
             detection.confidence,
@@ -1820,8 +1834,68 @@ class JetsonYoloRosbridgeClient:
             cluster.count,
             original_path or "-",
             annotated_path or "-",
+            self.documentation_dir if documentation_paths else "-",
             snapshot_path or "-",
         )
+
+    def _save_documentation_images(
+        self,
+        *,
+        event_id: str,
+        label_slug: str,
+        frame: np.ndarray,
+        detection: Detection,
+        source_msg: Dict[str, Any],
+    ) -> Dict[str, Path]:
+        selected_depth = self._select_depth_frame(source_msg)
+        depth_image = selected_depth[0] if selected_depth is not None else None
+        images = build_documentation_images(
+            frame=frame,
+            detection=detection,
+            depth_image=depth_image,
+            privacy_blur_kernel_size=self.config.privacy_blur_kernel_size,
+            privacy_bbox_padding_ratio=self.config.privacy_bbox_padding_ratio,
+            privacy_use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+            mask_erode_px=self.config.segmentation_depth_mask_erode_px,
+            roi_scale=self.config.depth_roi_scale,
+            min_distance_m=self.config.depth_min_distance_m,
+            max_distance_m=self.config.depth_max_distance_m,
+        )
+        suffixes = {
+            "rgb_bbox": ("01_rgb_bbox", ".jpg"),
+            "mask_raw": ("02_mask_raw", ".png"),
+            "mask_eroded": ("03_mask_eroded", ".png"),
+            "depth_colormap": ("04_depth_colormap", ".png"),
+        }
+        paths: Dict[str, Path] = {}
+        for key, image in images.items():
+            stem, extension = suffixes[key]
+            path = self.documentation_dir / (
+                f"{event_id}_{label_slug}_{stem}{extension}"
+            )
+            _write_image(
+                path,
+                image,
+                quality=self.config.jpeg_quality if extension == ".jpg" else None,
+            )
+            paths[key] = path
+
+        missing = [key for key in suffixes if key not in paths]
+        if missing:
+            LOGGER.warning(
+                "Documentation set for %s is incomplete; missing %s. "
+                "A segmentation mask and synchronized aligned-depth frame are "
+                "required for all four images.",
+                event_id,
+                ", ".join(missing),
+            )
+        else:
+            LOGGER.info(
+                "Saved four documentation images for %s under %s",
+                event_id,
+                self.documentation_dir,
+            )
+        return paths
 
     def _distance_for_detection(
         self,
@@ -2321,6 +2395,169 @@ def build_event_annotated_frame(
         else frame.copy()
     )
     return annotate_frame(base, detections)
+
+
+def build_documentation_images(
+    *,
+    frame: np.ndarray,
+    detection: Detection,
+    depth_image: Optional[np.ndarray],
+    privacy_blur_kernel_size: int,
+    privacy_bbox_padding_ratio: float,
+    privacy_use_segmentation_masks: bool,
+    mask_erode_px: int,
+    roi_scale: float,
+    min_distance_m: float,
+    max_distance_m: float,
+) -> Dict[str, np.ndarray]:
+    """Build synchronized, publication-ready views of one detection.
+
+    The binary mask views use RGB resolution. The depth view uses the aligned
+    depth image, the same central ROI and the same eroded instance mask as the
+    distance estimator, then resizes to RGB resolution for side-by-side use.
+    """
+    if frame.size == 0:
+        return {}
+
+    height, width = frame.shape[:2]
+    privacy_frame = blur_except_detections(
+        frame,
+        [detection],
+        kernel_size=privacy_blur_kernel_size,
+        padding_ratio=privacy_bbox_padding_ratio,
+        use_segmentation_masks=privacy_use_segmentation_masks,
+        draw_track_id=False,
+        draw_mask_overlay=False,
+    )
+    bbox_only = Detection(
+        label=detection.label,
+        confidence=detection.confidence,
+        bbox_xyxy=list(detection.bbox_xyxy),
+        track_id=detection.track_id,
+        mask=None,
+    )
+    images: Dict[str, np.ndarray] = {
+        "rgb_bbox": annotate_frame(privacy_frame, [bbox_only]),
+    }
+
+    raw_mask = _normalized_detection_mask(detection, height, width)
+    if raw_mask is None:
+        return images
+
+    raw_mask_u8 = raw_mask.astype(np.uint8)
+    erode_iterations = max(0, int(mask_erode_px))
+    eroded_mask_u8 = raw_mask_u8.copy()
+    if erode_iterations > 0:
+        eroded_mask_u8 = cv2.erode(
+            eroded_mask_u8,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=erode_iterations,
+        )
+    images["mask_raw"] = raw_mask_u8 * 255
+    images["mask_eroded"] = eroded_mask_u8 * 255
+
+    if depth_image is None or depth_image.size == 0:
+        return images
+
+    depth = np.asarray(depth_image, dtype=np.float32)
+    if depth.ndim > 2:
+        depth = np.squeeze(depth)
+    if depth.ndim != 2:
+        return images
+    depth_height, depth_width = depth.shape
+
+    depth_mask = cv2.resize(
+        raw_mask_u8,
+        (depth_width, depth_height),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    if erode_iterations > 0:
+        depth_mask = cv2.erode(
+            depth_mask,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=erode_iterations,
+        )
+
+    x1, y1, x2, y2 = [float(value) for value in detection.bbox_xyxy[:4]]
+    center_x = (x1 + x2) * 0.5
+    center_y = (y1 + y2) * 0.5
+    scale = max(0.1, min(1.0, float(roi_scale)))
+    half_width = max(0.5, (x2 - x1) * scale * 0.5)
+    half_height = max(0.5, (y2 - y1) * scale * 0.5)
+    sx = float(depth_width) / float(width)
+    sy = float(depth_height) / float(height)
+    dx1 = max(0, int(np.floor((center_x - half_width) * sx)))
+    dy1 = max(0, int(np.floor((center_y - half_height) * sy)))
+    dx2 = min(depth_width, int(np.ceil((center_x + half_width) * sx)))
+    dy2 = min(depth_height, int(np.ceil((center_y + half_height) * sy)))
+    if dx2 <= dx1 or dy2 <= dy1:
+        return images
+
+    roi_selection = np.zeros((depth_height, depth_width), dtype=bool)
+    roi_selection[dy1:dy2, dx1:dx2] = True
+    selection = (
+        roi_selection
+        & depth_mask.astype(bool)
+        & np.isfinite(depth)
+        & (depth >= float(min_distance_m))
+        & (depth <= float(max_distance_m))
+    )
+    valid_count = int(np.count_nonzero(selection))
+    if valid_count == 0:
+        return images
+
+    distance_span = max(1e-6, float(max_distance_m) - float(min_distance_m))
+    normalized = np.zeros((depth_height, depth_width), dtype=np.uint8)
+    normalized[selection] = np.clip(
+        (
+            (float(max_distance_m) - depth[selection])
+            / distance_span
+            * 255.0
+        ),
+        0.0,
+        255.0,
+    ).astype(np.uint8)
+    colorized = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
+    depth_view = np.zeros_like(colorized)
+    depth_view[selection] = colorized[selection]
+    if (depth_width, depth_height) != (width, height):
+        depth_view = cv2.resize(
+            depth_view,
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    label = (
+        f"near=red {float(min_distance_m):.2f} m  "
+        f"far=blue {float(max_distance_m):.2f} m  valid={valid_count}"
+    )
+    font_scale = max(0.35, min(0.55, width / 1280.0))
+    thickness = max(1, int(round(width / 640.0)))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        thickness,
+    )
+    cv2.rectangle(
+        depth_view,
+        (0, 0),
+        (min(width - 1, text_width + 8), text_height + baseline + 8),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(
+        depth_view,
+        label,
+        (4, text_height + 3),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    images["depth_colormap"] = depth_view
+    return images
 
 
 def _normalized_detection_mask(

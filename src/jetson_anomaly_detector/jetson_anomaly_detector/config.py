@@ -133,6 +133,7 @@ class AppConfig:
     jpeg_quality: int = 85
     save_per_event_images: bool = True
     save_annotated_privacy_blur: bool = True
+    save_documentation_images: bool = False
     daily_map_summary: bool = True
     daily_map_summary_topic_publish: bool = True
     debug_image_always_stream: bool = True
@@ -280,6 +281,7 @@ ENV_OVERRIDES = {
     "jpeg_quality": ("DEBUG_JPEG_QUALITY", _env_int),
     "save_per_event_images": ("SAVE_PER_EVENT_IMAGES", _env_bool),
     "save_annotated_privacy_blur": ("SAVE_ANNOTATED_PRIVACY_BLUR", _env_bool),
+    "save_documentation_images": ("SAVE_DOCUMENTATION_IMAGES", _env_bool),
     "daily_map_summary": ("DAILY_MAP_SUMMARY", _env_bool),
     "daily_map_summary_topic_publish": ("DAILY_MAP_SUMMARY_TOPIC_PUBLISH", _env_bool),
     "debug_image_always_stream": ("DEBUG_IMAGE_ALWAYS_STREAM", _env_bool),

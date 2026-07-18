@@ -8,6 +8,10 @@ from .models import Detection, DistanceEstimate, ObjectPoseMap, RobotPoseMap
 from .ros_messages import iso_timestamp
 
 
+def _serialized_path(path: Optional[Path]) -> Optional[str]:
+    return path.as_posix() if path else None
+
+
 def pose_to_dict(pose: RobotPoseMap) -> Dict[str, float]:
     return {"x": pose.x, "y": pose.y, "yaw": pose.yaw}
 
@@ -32,7 +36,9 @@ def build_event(
     map_snapshot: Optional[Path],
     daily_map_summary: Optional[Path],
     event_log: Path,
+    documentation_images: Optional[Dict[str, Path]] = None,
 ) -> Dict[str, Any]:
+    documentation_images = documentation_images or {}
     return {
         "id": event_id,
         "timestamp": iso_timestamp(),
@@ -73,11 +79,14 @@ def build_event(
             "merge_radius_m": round(float(cluster_merge_radius_m), 3),
         },
         "jetson_files": {
-            "original_image": str(original_image) if original_image else None,
-            "annotated_image": str(annotated_image) if annotated_image else None,
-            "map_snapshot": str(map_snapshot) if map_snapshot else None,
-            "daily_map_summary": str(daily_map_summary) if daily_map_summary else None,
-            "event_log": str(event_log),
+            "original_image": _serialized_path(original_image),
+            "annotated_image": _serialized_path(annotated_image),
+            "map_snapshot": _serialized_path(map_snapshot),
+            "daily_map_summary": _serialized_path(daily_map_summary),
+            "documentation_images": {
+                key: path.as_posix() for key, path in documentation_images.items()
+            },
+            "event_log": event_log.as_posix(),
         },
     }
 

@@ -92,6 +92,7 @@ ANOMALY_MIN_OBSERVATIONS=2
 ANOMALY_CONFIRMATION_TTL_S=6.0
 SAVE_PER_EVENT_IMAGES=1
 SAVE_ANNOTATED_PRIVACY_BLUR=1
+SAVE_DOCUMENTATION_IMAGES=1
 DAILY_MAP_SUMMARY=1
 DEBUG_IMAGE_ALWAYS_STREAM=1
 DEBUG_IMAGE_ON_DETECTION=1
@@ -404,6 +405,14 @@ Jetson writes:
 - original frames: `/home/jetson/anomaly_logs/images/original/`
 - annotated frames: `/home/jetson/anomaly_logs/images/annotated/` (blurred
   outside the detected bottle when `SAVE_ANNOTATED_PRIVACY_BLUR=1`)
+- synchronized documentation sets:
+  `/home/jetson/anomaly_logs/images/documentation/`. When
+  `SAVE_DOCUMENTATION_IMAGES=1`, every confirmed event attempts to save four
+  same-frame views named `01_rgb_bbox.jpg`, `02_mask_raw.png`,
+  `03_mask_eroded.png`, and `04_depth_colormap.png`. A segmentation mask and a
+  synchronized aligned-depth frame are required for a complete set. The RGB
+  view preserves privacy by blurring the background and leaving only the
+  segmented object visible before drawing its bounding box.
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`
