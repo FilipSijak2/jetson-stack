@@ -180,12 +180,16 @@ za svaki potvrđeni događaj sprema sinkronizirani skup u
 3. masku erodiranu prema `segmentation_depth_mask_erode_px`
 4. valjane aligned-depth piksele unutar erodirane maske i središnjeg ROI-ja,
    obojene TURBO paletom (bliže crveno, dalje plavo)
+5. završni kompozit prethodna četiri prikaza u rasporedu 2 × 2, s oznakama
+   `(a)`–`(d)` i nazivom svakog prikaza
 
 Datoteke istog događaja dijele prefiks, primjerice
 `anom_00042_bottle_01_rgb_bbox.jpg` do
-`anom_00042_bottle_04_depth_colormap.png`. Ako maska ili vremenski usklađen
-depth kadar nisu dostupni, spremaju se dostupni prikazi i u log se upisuje koji
-prikazi nedostaju.
+`anom_00042_bottle_04_depth_colormap.png`. Kada je skup potpun, automatski se
+sprema i `anom_00042_bottle_05_documentation_composite.png`, spreman za
+umetanje u Word ili PDF. Ako maska ili vremenski usklađen depth kadar nisu
+dostupni, spremaju se dostupni pojedinačni prikazi i u log se upisuje koji
+prikazi nedostaju; nepotpuni kompozit se ne izrađuje.
 
 Privacy RGB prikaz koristi iste postavke kao privacy stream:
 `privacy_blur_kernel_size`, `privacy_bbox_padding_ratio` i

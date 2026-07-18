@@ -412,7 +412,9 @@ Jetson writes:
   `03_mask_eroded.png`, and `04_depth_colormap.png`. A segmentation mask and a
   synchronized aligned-depth frame are required for a complete set. The RGB
   view preserves privacy by blurring the background and leaving only the
-  segmented object visible before drawing its bounding box.
+  segmented object visible before drawing its bounding box. Complete sets are
+  also assembled automatically as a labeled 2-by-2 figure named
+  `05_documentation_composite.png` for direct use in reports.
 - daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
 - map snapshots: `/home/jetson/anomaly_logs/map_images/`
 - JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`

@@ -22,6 +22,7 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     _local_day_key,
     _target_center,
     blur_except_detections,
+    build_documentation_composite,
     build_documentation_images,
     build_event_annotated_frame,
 )
@@ -243,6 +244,12 @@ class TrackingAndSegmentationTest(unittest.TestCase):
                 frame[85:95, 95:110],
             )
         )
+        composite = build_documentation_composite(images)
+        self.assertIsNotNone(composite)
+        assert composite is not None
+        self.assertGreater(composite.shape[0], frame.shape[0] * 2)
+        self.assertGreater(composite.shape[1], frame.shape[1] * 2)
+        self.assertEqual(composite.shape[2], 3)
 
     def test_documentation_images_degrade_cleanly_without_mask_or_depth(self) -> None:
         frame = np.zeros((60, 80, 3), dtype=np.uint8)
@@ -262,6 +269,7 @@ class TrackingAndSegmentationTest(unittest.TestCase):
         )
 
         self.assertEqual(set(images), {"rgb_bbox"})
+        self.assertIsNone(build_documentation_composite(images))
 
     def test_depth_filter_rejects_far_jump_and_accepts_closer_value(self) -> None:
         client = JetsonYoloRosbridgeClient.__new__(

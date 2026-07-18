@@ -1890,8 +1890,15 @@ class JetsonYoloRosbridgeClient:
                 ", ".join(missing),
             )
         else:
+            composite = build_documentation_composite(images)
+            if composite is not None:
+                composite_path = self.documentation_dir / (
+                    f"{event_id}_{label_slug}_05_documentation_composite.png"
+                )
+                _write_image(composite_path, composite)
+                paths["composite"] = composite_path
             LOGGER.info(
-                "Saved four documentation images for %s under %s",
+                "Saved four documentation images and composite for %s under %s",
                 event_id,
                 self.documentation_dir,
             )
@@ -2558,6 +2565,93 @@ def build_documentation_images(
     )
     images["depth_colormap"] = depth_view
     return images
+
+
+def build_documentation_composite(
+    images: Dict[str, np.ndarray],
+) -> Optional[np.ndarray]:
+    """Arrange the complete documentation set as a labeled 2-by-2 figure."""
+    panels = (
+        ("rgb_bbox", "(a) Privacy RGB prikaz i bounding box"),
+        ("mask_raw", "(b) Izvorna segmentacijska maska"),
+        ("mask_eroded", "(c) Erodirana segmentacijska maska"),
+        ("depth_colormap", "(d) Valjani depth pikseli prema udaljenosti"),
+    )
+    if any(key not in images or images[key].size == 0 for key, _ in panels):
+        return None
+
+    reference = images["rgb_bbox"]
+    height, width = reference.shape[:2]
+    if height <= 0 or width <= 0:
+        return None
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.4, min(1.0, width / 900.0))
+    thickness = max(1, int(round(width / 640.0)))
+    available_width = max(1, width - 20)
+    for _, label in panels:
+        (label_width, _), _ = cv2.getTextSize(
+            label,
+            font,
+            font_scale,
+            thickness,
+        )
+        if label_width > available_width:
+            font_scale *= available_width / float(label_width)
+    font_scale = max(0.3, font_scale)
+    text_sizes = [
+        cv2.getTextSize(label, font, font_scale, thickness)
+        for _, label in panels
+    ]
+    max_text_height = max(size[0][1] + size[1] for size in text_sizes)
+    header_height = max(34, max_text_height + 16)
+    gap = max(8, int(round(min(width, height) * 0.02)))
+    tile_height = header_height + height
+    canvas = np.full(
+        (tile_height * 2 + gap, width * 2 + gap, 3),
+        255,
+        dtype=np.uint8,
+    )
+
+    for index, ((key, label), text_size) in enumerate(zip(panels, text_sizes)):
+        panel = images[key]
+        if panel.ndim == 2:
+            panel = cv2.cvtColor(panel, cv2.COLOR_GRAY2BGR)
+        elif panel.ndim == 3 and panel.shape[2] == 4:
+            panel = cv2.cvtColor(panel, cv2.COLOR_BGRA2BGR)
+        if panel.shape[:2] != (height, width):
+            panel = cv2.resize(
+                panel,
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        row, column = divmod(index, 2)
+        x = column * (width + gap)
+        y = row * (tile_height + gap)
+        canvas[y + header_height : y + tile_height, x : x + width] = panel
+        label_width, label_height = text_size[0]
+        text_x = x + max(8, (width - label_width) // 2)
+        text_y = y + max(label_height + 4, (header_height + label_height) // 2)
+        cv2.putText(
+            canvas,
+            label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (20, 20, 20),
+            thickness,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(
+            canvas,
+            (x, y),
+            (x + width - 1, y + tile_height - 1),
+            (160, 160, 160),
+            max(1, thickness),
+        )
+
+    return canvas
 
 
 def _normalized_detection_mask(
