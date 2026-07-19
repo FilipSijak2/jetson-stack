@@ -38,6 +38,7 @@ from .models import (
 from .ros_messages import (
     compressed_image_msg,
     decode_compressed_image,
+    decode_compressed_depth_image,
     decode_depth_image,
     encode_image,
     header_stamp_seconds,
@@ -231,6 +232,10 @@ class JetsonYoloRosbridgeClient:
         self.next_debug_image_publish = 0.0
         self.next_privacy_image_publish = 0.0
         self.next_detection_3d_publish = 0.0
+        self.depth_frames_received = 0
+        self.last_depth_selection_log = 0.0
+        self.last_detection_3d_skip_log = 0.0
+        self.detection_3d_publish_logged = False
         self.last_missing_pose_log = 0.0
         self.last_missing_map_log = 0.0
         self.last_missing_scan_log = 0.0
@@ -274,9 +279,14 @@ class JetsonYoloRosbridgeClient:
         self.rosbridge.subscribe(self.config.camera_topic, "sensor_msgs/CompressedImage", queue_length=1)
         self.rosbridge.subscribe(self.config.map_topic, "nav_msgs/OccupancyGrid", queue_length=1, throttle_rate=500)
         if self.config.use_depth_distance and self.config.depth_topic:
+            depth_message_type = (
+                "sensor_msgs/CompressedImage"
+                if "compresseddepth" in self.config.depth_topic.lower()
+                else "sensor_msgs/Image"
+            )
             self.rosbridge.subscribe(
                 self.config.depth_topic,
-                "sensor_msgs/Image",
+                depth_message_type,
                 queue_length=1,
                 throttle_rate=self.config.depth_throttle_ms,
             )
@@ -436,8 +446,27 @@ class JetsonYoloRosbridgeClient:
 
     def _on_depth_image(self, msg: Dict[str, Any]) -> None:
         try:
-            depth = decode_depth_image(msg)
+            is_compressed = (
+                "compresseddepth" in self.config.depth_topic.lower()
+                or "compresseddepth" in str(msg.get("format", "")).lower()
+            )
+            depth = (
+                decode_compressed_depth_image(msg)
+                if is_compressed
+                else decode_depth_image(msg)
+            )
             self.depth_buffer.append((header_stamp_seconds(msg), time.monotonic(), depth))
+            self.depth_frames_received += 1
+            if self.depth_frames_received == 1:
+                LOGGER.info(
+                    "Received first depth frame topic=%s transport=%s "
+                    "size=%dx%d valid_pixels=%d",
+                    self.config.depth_topic,
+                    "compressedDepth" if is_compressed else "raw",
+                    depth.shape[1],
+                    depth.shape[0],
+                    int(np.count_nonzero(np.isfinite(depth) & (depth > 0.0))),
+                )
         except Exception as exc:
             LOGGER.warning("Failed to decode depth image: %s", exc)
 
@@ -2085,12 +2114,31 @@ class JetsonYoloRosbridgeClient:
                 measurement.age_s or 0.0,
                 detection.label,
             )
+        else:
+            self._log_depth_selection_issue(
+                "synchronized frame exists, but the masked ROI has too few "
+                "valid depth pixels"
+            )
         return measurement
+
+    def _log_depth_selection_issue(self, reason: str) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "last_depth_selection_log", 0.0) < 5.0:
+            return
+        self.last_depth_selection_log = now
+        LOGGER.info(
+            "Depth unavailable for localization/3D: %s. "
+            "Distance may fall back to laser.",
+            reason,
+        )
 
     def _select_depth_frame(
         self, source_msg: Dict[str, Any]
     ) -> Optional[tuple[np.ndarray, float]]:
         if not self.depth_buffer:
+            self._log_depth_selection_issue(
+                f"no frames received on {self.config.depth_topic}"
+            )
             return None
         now = time.monotonic()
         camera_stamp = header_stamp_seconds(source_msg)
@@ -2098,6 +2146,11 @@ class JetsonYoloRosbridgeClient:
             item for item in self.depth_buffer if now - item[1] <= self.config.depth_max_age_s
         ]
         if not candidates:
+            newest_age = now - self.depth_buffer[-1][1]
+            self._log_depth_selection_issue(
+                f"newest frame is {newest_age:.3f} s old "
+                f"(limit {self.config.depth_max_age_s:.3f} s)"
+            )
             return None
 
         if camera_stamp is not None and self.config.depth_sync_tolerance_s > 0.0:
@@ -2106,10 +2159,9 @@ class JetsonYoloRosbridgeClient:
                 selected = min(stamped, key=lambda item: abs(float(item[0]) - camera_stamp))
                 timestamp_delta = abs(float(selected[0]) - camera_stamp)
                 if timestamp_delta > self.config.depth_sync_tolerance_s:
-                    LOGGER.debug(
-                        "Closest depth frame is %.3f s from RGB frame (limit %.3f s)",
-                        timestamp_delta,
-                        self.config.depth_sync_tolerance_s,
+                    self._log_depth_selection_issue(
+                        f"closest depth frame is {timestamp_delta:.3f} s from "
+                        f"RGB (limit {self.config.depth_sync_tolerance_s:.3f} s)"
                     )
                     return None
                 return selected[2], timestamp_delta
@@ -2174,7 +2226,11 @@ class JetsonYoloRosbridgeClient:
         )
         intrinsics = self.camera_intrinsics
         selected = self._select_depth_frame(source_msg)
-        if intrinsics is None or selected is None:
+        if intrinsics is None:
+            self._log_detection_3d_skip("CameraInfo intrinsics are unavailable")
+            return
+        if selected is None:
+            self._log_detection_3d_skip("no synchronized depth frame")
             return
         depth, _depth_age_s = selected
         height, width = frame.shape[:2]
@@ -2201,6 +2257,9 @@ class JetsonYoloRosbridgeClient:
             if bounds is not None:
                 bounded.append((detection, bounds))
         if not bounded:
+            self._log_detection_3d_skip(
+                "no detection had enough valid masked 3D points"
+            )
             return
 
         header = source_msg.get("header") or {}
@@ -2222,6 +2281,22 @@ class JetsonYoloRosbridgeClient:
             text_show_distance=self.config.detection_3d_text_show_distance,
         )
         self.rosbridge.publish(self.config.detection_3d_topic, marker_array)
+        if not self.detection_3d_publish_logged:
+            self.detection_3d_publish_logged = True
+            LOGGER.info(
+                "Published first local 3D detection marker topic=%s frame=%s "
+                "objects=%d",
+                self.config.detection_3d_topic,
+                frame_id,
+                len(bounded),
+            )
+
+    def _log_detection_3d_skip(self, reason: str) -> None:
+        now = time.monotonic()
+        if now - self.last_detection_3d_skip_log < 5.0:
+            return
+        self.last_detection_3d_skip_log = now
+        LOGGER.info("Local 3D marker not published: %s", reason)
 
     def _daily_map_path(self) -> Path:
         return self.daily_map_dir / f"anomalies_{self.current_daily_key}.png"

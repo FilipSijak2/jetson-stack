@@ -1,8 +1,11 @@
+import base64
 import math
+import struct
 import unittest
 from collections import deque
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from jetson_anomaly_detector.localization import (
@@ -15,7 +18,11 @@ from jetson_anomaly_detector.jetson_yolo_rosbridge_client import (
     blur_except_detections,
 )
 from jetson_anomaly_detector.models import CameraIntrinsics, Detection, RobotPoseMap
-from jetson_anomaly_detector.ros_messages import header_stamp_seconds, parse_camera_info
+from jetson_anomaly_detector.ros_messages import (
+    decode_compressed_depth_image,
+    header_stamp_seconds,
+    parse_camera_info,
+)
 
 
 class LocalizationTest(unittest.TestCase):
@@ -92,6 +99,24 @@ class LocalizationTest(unittest.TestCase):
 
 
 class DepthSynchronizationTest(unittest.TestCase):
+    def test_decodes_realsense_16uc1_compressed_depth_in_metres(self) -> None:
+        depth_mm = np.array([[0, 750], [1250, 2500]], dtype=np.uint16)
+        ok, png = cv2.imencode(".png", depth_mm)
+        self.assertTrue(ok)
+        config_header = struct.pack("<iff", 1, 0.0, 0.0)
+        decoded = decode_compressed_depth_image(
+            {
+                "format": "16UC1; compressedDepth png",
+                "data": base64.b64encode(
+                    config_header + png.tobytes()
+                ).decode("ascii"),
+            }
+        )
+        np.testing.assert_allclose(
+            decoded,
+            depth_mm.astype(np.float32) * 0.001,
+        )
+
     def test_selects_closest_depth_timestamp_and_rejects_mismatch(self) -> None:
         client = JetsonYoloRosbridgeClient.__new__(JetsonYoloRosbridgeClient)
         client.config = SimpleNamespace(

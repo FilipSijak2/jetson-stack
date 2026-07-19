@@ -52,11 +52,13 @@ def _env_list(name: str, default: List[str]) -> List[str]:
 @dataclass(frozen=True)
 class AppConfig:
     rosbridge_url: str = "ws://raspberry.local:9090"
-    camera_topic: str = "/camera/color/image/compressed"
+    camera_topic: str = "/camera/realsense/color/image_raw/compressed"
     map_topic: str = "/map"
     robot_pose_topic: str = "/robot_pose_map"
     scan_topic: str = "/scan"
-    depth_topic: str = "/camera/realsense/aligned_depth_to_color/image_raw"
+    depth_topic: str = (
+        "/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth"
+    )
     camera_info_topic: str = "/camera/realsense/color/camera_info"
     event_topic: str = "/anomaly/events"
     readable_event_topic: str = "/anomaly/events/readable"

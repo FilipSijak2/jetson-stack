@@ -3,11 +3,11 @@
 
 rosbridge_url: ws://raspberry.local:9090
 
-camera_topic: /camera/color/image/compressed
+camera_topic: /camera/realsense/color/image_raw/compressed
 map_topic: /map
 robot_pose_topic: /robot_pose_map
 scan_topic: /scan
-depth_topic: /camera/realsense/aligned_depth_to_color/image_raw
+depth_topic: /camera/realsense/aligned_depth_to_color/image_raw/compressedDepth
 camera_info_topic: /camera/realsense/color/camera_info
 
 event_topic: /anomaly/events

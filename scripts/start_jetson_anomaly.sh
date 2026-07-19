@@ -3,8 +3,8 @@ set -euo pipefail
 
 : "${ANOMALY_CONFIG_FILE:=/workspace/config/anomaly_rosbridge.yaml}"
 : "${ROSBRIDGE_URL:=ws://raspberry.local:9090}"
-: "${CAMERA_TOPIC:=/camera/color/image/compressed}"
-: "${DEPTH_TOPIC:=/camera/realsense/aligned_depth_to_color/image_raw}"
+: "${CAMERA_TOPIC:=/camera/realsense/color/image_raw/compressed}"
+: "${DEPTH_TOPIC:=/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth}"
 : "${MAP_TOPIC:=/map}"
 : "${ROBOT_POSE_TOPIC:=/robot_pose_map}"
 : "${EVENT_TOPIC:=/anomaly/events}"

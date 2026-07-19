@@ -24,11 +24,12 @@ WebSocket and publishes only the small visualization topics needed by Foxglove.
 
 Jetson subscribes through rosbridge:
 
-- `/camera/color/image/compressed` (`sensor_msgs/CompressedImage`)
+- `/camera/realsense/color/image_raw/compressed`
+  (`sensor_msgs/CompressedImage`)
 - `/camera/realsense/color/camera_info` (`sensor_msgs/CameraInfo`) when camera
   intrinsics are enabled
-- `/camera/realsense/aligned_depth_to_color/image_raw` (`sensor_msgs/Image`)
-  when depth distance is enabled
+- `/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth`
+  (`sensor_msgs/CompressedImage`) when depth distance is enabled
 - `/map` (`nav_msgs/OccupancyGrid`)
 - `/robot_pose_map` (`geometry_msgs/PoseStamped`) or `/amcl_pose`
   (`geometry_msgs/PoseWithCovarianceStamped`) when configured
@@ -65,8 +66,8 @@ the robot stack's `config/containers/*.env` layout. Important defaults:
 
 ```bash
 ROSBRIDGE_URL=ws://raspberry.local:9090
-CAMERA_TOPIC=/camera/color/image/compressed
-DEPTH_TOPIC=/camera/realsense/aligned_depth_to_color/image_raw
+CAMERA_TOPIC=/camera/realsense/color/image_raw/compressed
+DEPTH_TOPIC=/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth
 CAMERA_INFO_TOPIC=/camera/realsense/color/camera_info
 MAP_TOPIC=/map
 ROBOT_POSE_TOPIC=/robot_pose_map
@@ -202,8 +203,9 @@ for each new event and keeps a daily map summary at
 `/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` as new
 anomaly clusters are detected.
 
-If your active RealSense compressed topic is namespaced differently, set for
-example:
+RGB, CameraInfo and aligned depth should come from the same RealSense device so
+their timestamps, pixel coordinates and optical frame agree. If the active
+RealSense compressed color topic is namespaced differently, set for example:
 
 ```bash
 CAMERA_TOPIC=/camera/realsense/color/image_raw/compressed
@@ -214,6 +216,11 @@ or:
 ```bash
 CAMERA_TOPIC=/camera/realsense/color/image_compressed
 ```
+
+The preferred depth transport is `compressedDepth`; it avoids sending each
+640x480 16-bit raw depth image as a large base64 JSON payload through
+rosbridge. The Jetson client decodes `16UC1; compressedDepth png` directly to
+metres.
 
 ## YOLO Dependencies
 

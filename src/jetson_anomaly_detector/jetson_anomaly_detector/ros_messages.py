@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import math
+import struct
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -74,6 +75,43 @@ def decode_depth_image(msg: Dict[str, Any]) -> np.ndarray:
     packed = np.ascontiguousarray(rows[:, :row_bytes])
     depth = packed.view(dtype).reshape((height, width)).astype(np.float32)
     return depth * scale
+
+
+def decode_compressed_depth_image(msg: Dict[str, Any]) -> np.ndarray:
+    """Decode a ROS compressedDepth image and return depth in metres."""
+    raw = decode_uint8_array(msg.get("data", ""))
+    png_signature = b"\x89PNG\r\n\x1a\n"
+    png_offset = raw.find(png_signature)
+    if png_offset < 0:
+        raise ValueError("compressedDepth payload has no PNG signature")
+
+    encoded = np.frombuffer(raw[png_offset:], dtype=np.uint8)
+    decoded = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
+    if decoded is None or decoded.ndim != 2:
+        raise ValueError("OpenCV could not decode compressedDepth PNG")
+
+    image_format = str(msg.get("format", "")).strip().lower()
+    if "32fc1" in image_format:
+        if png_offset < 12:
+            raise ValueError("32FC1 compressedDepth payload has no config header")
+        _compression_format, depth_quant_a, depth_quant_b = struct.unpack_from(
+            "<iff", raw, 0
+        )
+        inverse_depth = decoded.astype(np.float32)
+        depth = np.full(inverse_depth.shape, np.nan, dtype=np.float32)
+        valid = inverse_depth > 0.0
+        denominator = inverse_depth[valid] - float(depth_quant_b)
+        nonzero = np.abs(denominator) > 1e-6
+        values = np.full(denominator.shape, np.nan, dtype=np.float32)
+        values[nonzero] = float(depth_quant_a) / denominator[nonzero]
+        depth[valid] = values
+        return depth
+
+    if decoded.dtype != np.uint16:
+        raise ValueError(
+            f"Unsupported compressedDepth PNG dtype: {decoded.dtype}"
+        )
+    return decoded.astype(np.float32) * 0.001
 
 
 def compressed_image_msg(

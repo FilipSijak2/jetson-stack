@@ -142,6 +142,20 @@ tracking_enabled: false
 
 ## Instance segmentacija i depth
 
+Aktivni RGB, CameraInfo i depth ulazi dolaze iz iste RealSense kamere:
+
+```yaml
+camera_topic: /camera/realsense/color/image_raw/compressed
+camera_info_topic: /camera/realsense/color/camera_info
+depth_topic: /camera/realsense/aligned_depth_to_color/image_raw/compressedDepth
+```
+
+Za depth se koristi `compressedDepth` transport kako se sirova 16-bitna slika
+ne bi prenosila kao veliki JSON/base64 payload kroz rosbridge. Dekodirana
+vrijednost `16UC1` pretvara se iz milimetara u metre. Isti RealSense izvor važan
+je i zbog vremenske sinkronizacije i zato što se segmentacijska maska iz RGB
+slike primjenjuje na aligned-depth piksele.
+
 Za maske je potreban segmentacijski model, primjerice:
 
 ```yaml
