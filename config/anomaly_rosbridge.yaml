@@ -52,9 +52,9 @@ camera_horizontal_fov_deg: 69.0
 camera_yaw_offset_deg: 0.0
 use_camera_intrinsics: true
 use_depth_distance: true
-depth_throttle_ms: 200
+depth_throttle_ms: 100
 depth_max_age_s: 1.0
-depth_sync_tolerance_s: 0.25
+depth_sync_tolerance_s: 0.35
 depth_buffer_size: 8
 depth_roi_scale: 0.60
 depth_min_valid_pixels: 20

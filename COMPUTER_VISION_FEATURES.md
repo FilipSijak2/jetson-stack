@@ -156,6 +156,12 @@ vrijednost `16UC1` pretvara se iz milimetara u metre. Isti RealSense izvor važa
 je i zbog vremenske sinkronizacije i zato što se segmentacijska maska iz RGB
 slike primjenjuje na aligned-depth piksele.
 
+Depth se kroz rosbridge ograničava na najviše 10 Hz
+(`depth_throttle_ms: 100`), a RGB-depth vremenska razlika mora biti najviše
+`0.35 s`. Ta tolerancija pokriva transportno i inferencijsko kašnjenje izmjereno
+na platformi, dok `depth_max_age_s: 1.0` i dalje odbacuje stvarno zastarjele
+frameove.
+
 Za maske je potreban segmentacijski model, primjerice:
 
 ```yaml
@@ -204,6 +210,14 @@ sprema i `anom_00042_bottle_05_documentation_composite.png`, spreman za
 umetanje u Word ili PDF. Ako maska ili vremenski usklađen depth kadar nisu
 dostupni, spremaju se dostupni pojedinačni prikazi i u log se upisuje koji
 prikazi nedostaju; nepotpuni kompozit se ne izrađuje.
+
+Dnevna deduplikacija eventa ne blokira dokumentacijsko snimanje. Kada je objekt
+već prijavljen (`already_reported_today`) ili je aktivan cooldown, prvi frame
+tog tracka koji ima segmentacijsku masku i valjani sinkronizirani depth sprema
+se jednom s prefiksom poput
+`capture_bottle_track_43_20260719_133012_417`. Tako se četiri pojedinačna
+prikaza i `05_documentation_composite.png` mogu dobiti bez premještanja boce i
+bez stvaranja duplikata u `events.jsonl`.
 
 Privacy RGB prikaz koristi iste postavke kao privacy stream:
 `privacy_blur_kernel_size`, `privacy_bbox_padding_ratio` i

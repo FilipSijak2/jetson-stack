@@ -2,6 +2,7 @@ import json
 import logging
 import tempfile
 import unittest
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -273,6 +274,88 @@ class TrackingAndSegmentationTest(unittest.TestCase):
 
         self.assertEqual(set(images), {"rgb_bbox"})
         self.assertIsNone(build_documentation_composite(images))
+
+    def test_saves_complete_documentation_for_deduplicated_track(self) -> None:
+        frame = np.full((100, 120, 3), 80, dtype=np.uint8)
+        mask = np.zeros((100, 120), dtype=bool)
+        mask[25:80, 35:85] = True
+        depth = np.full((100, 120), np.nan, dtype=np.float32)
+        depth[25:80, 35:85] = 1.25
+        detection = Detection(
+            "bottle",
+            0.93,
+            [30, 20, 90, 85],
+            track_id=77,
+            mask=mask,
+        )
+        group = DetectionGroup(
+            label="bottle",
+            detections=[detection],
+            object_pose=ObjectPoseMap(1.0, 2.0, 0.0),
+            distance_estimate=DistanceEstimate(1.25, "depth"),
+            bearing_source="camera_intrinsics",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = JetsonYoloRosbridgeClient.__new__(
+                JetsonYoloRosbridgeClient
+            )
+            client.config = SimpleNamespace(
+                save_documentation_images=True,
+                privacy_blur_kernel_size=11,
+                privacy_bbox_padding_ratio=0.0,
+                privacy_use_segmentation_masks=True,
+                segmentation_depth_mask_erode_px=2,
+                depth_roi_scale=0.60,
+                depth_min_distance_m=0.15,
+                depth_max_distance_m=6.0,
+                depth_max_age_s=1.0,
+                depth_sync_tolerance_s=0.35,
+                jpeg_quality=85,
+            )
+            client.documentation_dir = Path(temp_dir)
+            client.documented_non_event_keys = set()
+            now = __import__("time").monotonic()
+            client.depth_buffer = deque(
+                [(10.0, now, depth)],
+                maxlen=8,
+            )
+            source_msg = {
+                "header": {
+                    "stamp": {"sec": 10, "nanosec": 0},
+                }
+            }
+
+            paths = client._save_non_event_documentation_if_ready(
+                group,
+                frame,
+                source_msg,
+            )
+            self.assertEqual(
+                set(paths),
+                {
+                    "rgb_bbox",
+                    "mask_raw",
+                    "mask_eroded",
+                    "depth_colormap",
+                    "composite",
+                },
+            )
+            self.assertEqual(
+                len(list(Path(temp_dir).glob("capture_*"))),
+                5,
+            )
+
+            repeated = client._save_non_event_documentation_if_ready(
+                group,
+                frame,
+                source_msg,
+            )
+            self.assertEqual(repeated, {})
+            self.assertEqual(
+                len(list(Path(temp_dir).glob("capture_*"))),
+                5,
+            )
 
     def test_saves_one_three_frame_tracking_sequence_per_track(self) -> None:
         yy, xx = np.indices((90, 120))

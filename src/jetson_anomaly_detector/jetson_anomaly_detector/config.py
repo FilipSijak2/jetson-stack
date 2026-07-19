@@ -97,9 +97,9 @@ class AppConfig:
     camera_yaw_offset_deg: float = 0.0
     use_camera_intrinsics: bool = True
     use_depth_distance: bool = True
-    depth_throttle_ms: int = 200
+    depth_throttle_ms: int = 100
     depth_max_age_s: float = 1.0
-    depth_sync_tolerance_s: float = 0.25
+    depth_sync_tolerance_s: float = 0.35
     depth_buffer_size: int = 8
     depth_roi_scale: float = 0.60
     depth_min_valid_pixels: int = 20
@@ -516,10 +516,10 @@ def load_config(config_file: Optional[str] = None) -> AppConfig:
         0.1,
         float(normalized.get("anomaly_confirmation_ttl_s", 6.0)),
     )
-    normalized["depth_throttle_ms"] = max(0, int(normalized.get("depth_throttle_ms", 200)))
+    normalized["depth_throttle_ms"] = max(0, int(normalized.get("depth_throttle_ms", 100)))
     normalized["depth_max_age_s"] = max(0.1, float(normalized.get("depth_max_age_s", 1.0)))
     normalized["depth_sync_tolerance_s"] = max(
-        0.0, float(normalized.get("depth_sync_tolerance_s", 0.25))
+        0.0, float(normalized.get("depth_sync_tolerance_s", 0.35))
     )
     normalized["depth_buffer_size"] = max(1, int(normalized.get("depth_buffer_size", 8)))
     normalized["depth_roi_scale"] = max(0.1, min(1.0, float(normalized.get("depth_roi_scale", 0.60))))

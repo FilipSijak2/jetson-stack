@@ -217,6 +217,7 @@ class JetsonYoloRosbridgeClient:
             tuple[str, int], deque[TrackingDocumentationSample]
         ] = {}
         self.documented_tracking_keys: set[tuple[str, int]] = set()
+        self.documented_non_event_keys: set[tuple[str, int]] = set()
         self.last_event_by_label: Dict[str, float] = {}
         self.last_event_clusters: Dict[str, float] = {}
         self.reported_anomalies: List[ReportedAnomaly] = []
@@ -1247,6 +1248,11 @@ class JetsonYoloRosbridgeClient:
                 track_id,
                 visible_track_ids,
             ):
+                self._save_non_event_documentation_if_ready(
+                    confirmed_group,
+                    frame,
+                    msg,
+                )
                 self._log_event_gate("already_reported_today", confirmed_group)
                 self._remember_reported(
                     confirmed_group.label,
@@ -1257,6 +1263,11 @@ class JetsonYoloRosbridgeClient:
                 self._refresh_daily_map_summary(msg)
                 continue
             if not self._cooldown_ready(confirmed_group.label, cluster.object_pose):
+                self._save_non_event_documentation_if_ready(
+                    confirmed_group,
+                    frame,
+                    msg,
+                )
                 self._log_event_gate("cooldown", confirmed_group)
                 continue
             try:
@@ -1904,6 +1915,79 @@ class JetsonYoloRosbridgeClient:
             min_distance_m=self.config.depth_min_distance_m,
             max_distance_m=self.config.depth_max_distance_m,
         )
+        return self._write_documentation_set(
+            prefix=f"{event_id}_{label_slug}",
+            images=images,
+            log_name=event_id,
+            warn_if_incomplete=True,
+        )
+
+    def _save_non_event_documentation_if_ready(
+        self,
+        group: DetectionGroup,
+        frame: np.ndarray,
+        source_msg: Dict[str, Any],
+    ) -> Dict[str, Path]:
+        if not self.config.save_documentation_images:
+            return {}
+        detection = max(group.detections, key=lambda item: item.confidence)
+        if detection.track_id is None or detection.mask is None:
+            return {}
+        key = (detection.label, int(detection.track_id))
+        if key in self.documented_non_event_keys:
+            return {}
+        if group.distance_estimate.source != "depth":
+            return {}
+        selected_depth = self._select_depth_frame(source_msg)
+        if selected_depth is None:
+            return {}
+
+        images = build_documentation_images(
+            frame=frame,
+            detection=detection,
+            depth_image=selected_depth[0],
+            privacy_blur_kernel_size=self.config.privacy_blur_kernel_size,
+            privacy_bbox_padding_ratio=self.config.privacy_bbox_padding_ratio,
+            privacy_use_segmentation_masks=self.config.privacy_use_segmentation_masks,
+            mask_erode_px=self.config.segmentation_depth_mask_erode_px,
+            roi_scale=self.config.depth_roi_scale,
+            min_distance_m=self.config.depth_min_distance_m,
+            max_distance_m=self.config.depth_max_distance_m,
+        )
+        required = {"rgb_bbox", "mask_raw", "mask_eroded", "depth_colormap"}
+        if not required.issubset(images):
+            return {}
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        prefix = (
+            f"capture_{_slug(detection.label)}_track_{int(detection.track_id)}_"
+            f"{timestamp}"
+        )
+        paths = self._write_documentation_set(
+            prefix=prefix,
+            images=images,
+            log_name=f"track {int(detection.track_id)}",
+            warn_if_incomplete=False,
+        )
+        if "composite" in paths:
+            self.documented_non_event_keys.add(key)
+            LOGGER.info(
+                "Saved complete non-event documentation set for "
+                "label=%s track_id=%d despite event deduplication: %s",
+                detection.label,
+                detection.track_id,
+                paths["composite"],
+            )
+        return paths
+
+    def _write_documentation_set(
+        self,
+        *,
+        prefix: str,
+        images: Dict[str, np.ndarray],
+        log_name: str,
+        warn_if_incomplete: bool,
+    ) -> Dict[str, Path]:
         suffixes = {
             "rgb_bbox": ("01_rgb_bbox", ".jpg"),
             "mask_raw": ("02_mask_raw", ".png"),
@@ -1913,9 +1997,7 @@ class JetsonYoloRosbridgeClient:
         paths: Dict[str, Path] = {}
         for key, image in images.items():
             stem, extension = suffixes[key]
-            path = self.documentation_dir / (
-                f"{event_id}_{label_slug}_{stem}{extension}"
-            )
+            path = self.documentation_dir / f"{prefix}_{stem}{extension}"
             _write_image(
                 path,
                 image,
@@ -1925,24 +2007,25 @@ class JetsonYoloRosbridgeClient:
 
         missing = [key for key in suffixes if key not in paths]
         if missing:
-            LOGGER.warning(
-                "Documentation set for %s is incomplete; missing %s. "
-                "A segmentation mask and synchronized aligned-depth frame are "
-                "required for all four images.",
-                event_id,
-                ", ".join(missing),
-            )
+            if warn_if_incomplete:
+                LOGGER.warning(
+                    "Documentation set for %s is incomplete; missing %s. "
+                    "A segmentation mask and synchronized aligned-depth frame "
+                    "are required for all four images.",
+                    log_name,
+                    ", ".join(missing),
+                )
         else:
             composite = build_documentation_composite(images)
             if composite is not None:
                 composite_path = self.documentation_dir / (
-                    f"{event_id}_{label_slug}_05_documentation_composite.png"
+                    f"{prefix}_05_documentation_composite.png"
                 )
                 _write_image(composite_path, composite)
                 paths["composite"] = composite_path
             LOGGER.info(
                 "Saved four documentation images and composite for %s under %s",
-                event_id,
+                log_name,
                 self.documentation_dir,
             )
         return paths

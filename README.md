@@ -74,7 +74,7 @@ ROBOT_POSE_TOPIC=/robot_pose_map
 SCAN_TOPIC=/scan
 USE_DEPTH_DISTANCE=1
 USE_CAMERA_INTRINSICS=1
-DEPTH_SYNC_TOLERANCE_S=0.25
+DEPTH_SYNC_TOLERANCE_S=0.35
 DEPTH_BUFFER_SIZE=8
 DEPTH_ROI_SCALE=0.60
 DEPTH_MIN_VALID_PIXELS=20
@@ -422,7 +422,11 @@ Jetson writes:
   view preserves privacy by blurring the background and leaving only the
   segmented object visible before drawing its bounding box. Complete sets are
   also assembled automatically as a labeled 2-by-2 figure named
-  `05_documentation_composite.png` for direct use in reports.
+  `05_documentation_composite.png` for direct use in reports. If an object is
+  suppressed by daily event de-duplication or cooldown, the first track frame
+  with a valid synchronized depth measurement is still saved once under a
+  `capture_<label>_track_<id>_<timestamp>_...` prefix. Documentation capture
+  therefore does not require a new anomaly event.
 - three-frame tracking documentation sequences in the same directory. When
   `SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1`, the first three consecutive
   inference frames for each segmented track are assembled horizontally as
