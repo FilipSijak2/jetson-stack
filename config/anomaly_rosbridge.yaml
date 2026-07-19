@@ -109,7 +109,7 @@ privacy_mask_overlay_alpha: 0.25
 
 # Autonomous close-up inspection. Keep disabled until both Jetson and nav_cont
 # settings are enabled and the robot has been tested in a clear area.
-inspection_enabled: false
+inspection_enabled: true
 inspection_standoff_m: 0.70
 inspection_min_distance_m: 0.40
 inspection_max_distance_m: 3.0
