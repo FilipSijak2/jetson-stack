@@ -21,7 +21,7 @@ concurrency:
 
 env:
   IMAGE_BASE: jetson_anomaly
-  JETSON_HOST: ${{ vars.JETSON_HOST || '100.125.121.125' }}
+  JETSON_HOST: ${{ vars.JETSON_HOST }}
   JETSON_STACK_DIR: ${{ vars.JETSON_STACK_DIR || '~/jetson-stack' }}
   IMAGE_ARCHIVE: /tmp/jetson_anomaly_image.tar
 
@@ -201,12 +201,15 @@ jobs:
         run: |
           set -e
           if [ -z "$TAILSCALE_KEY" ]; then
-            echo "TAILSCALE_AUTHKEY secret is required to reach Jetson at ${JETSON_HOST}." >&2
+            echo "TAILSCALE_AUTHKEY secret is required to reach the Jetson host." >&2
+            exit 1
+          fi
+          if [ -z "$JETSON_HOST" ]; then
+            echo "JETSON_HOST repository variable is required." >&2
             exit 1
           fi
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey "$TAILSCALE_KEY" --hostname "gh-jetson-${GITHUB_RUN_ID}" --accept-routes --ssh --timeout 40s
-          sudo tailscale status || true
 
       - name: Configure SSH
         if: github.event_name != 'pull_request'

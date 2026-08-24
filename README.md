@@ -1,535 +1,102 @@
-# Jetson YOLO Rosbridge Anomaly Client
+# Jetson Anomaly Detection Stack
 
-Detaljne upute za ByteTrack/BoT-SORT, instance segmentaciju, privacy maske i
-Foxglove zraku/krug nesigurnosti nalaze se u
-[`COMPUTER_VISION_FEATURES.md`](COMPUTER_VISION_FEATURES.md).
+This repository runs the deployed YOLO segmentation and anomaly-localization pipeline on a Jetson Orin. It connects to the Raspberry Pi ROS 2 graph through rosbridge; it does not join the robot DDS network.
 
-Jetson Orin runs the complete YOLO anomaly detection and evidence generation
-pipeline as a plain Python WebSocket client. It never joins the Raspberry Pi
-ROS 2 DDS graph. It connects to the Raspberry Pi through `rosbridge_server`
-WebSocket and publishes only the small visualization topics needed by Foxglove.
-
-## Runtime Split
-
-- Raspberry Pi runs ROS 2 navigation, SLAM, `/map`, `/tf`, `/tf_static`,
-  `/odom`, `/scan`, camera publishing, `rosbridge_server`, and
-  `foxglove_bridge`.
-- Jetson runs `jetson_yolo_rosbridge_client`, YOLO inference, local image
-  saving, event logging, marker generation, and map snapshot generation.
-- Foxglove connects to the Raspberry Pi, usually `ws://raspberry.local:8765`.
-- Jetson saves anomaly files under `/home/jetson/anomaly_logs` and does not copy
-  images back to the Raspberry Pi.
-
-## Topics
-
-Jetson subscribes through rosbridge:
-
-- `/camera/realsense/color/image_raw/compressed`
-  (`sensor_msgs/CompressedImage`)
-- `/camera/realsense/color/camera_info` (`sensor_msgs/CameraInfo`) when camera
-  intrinsics are enabled
-- `/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth`
-  (`sensor_msgs/CompressedImage`) when depth distance is enabled
-- `/map` (`nav_msgs/OccupancyGrid`)
-- `/robot_pose_map` (`geometry_msgs/PoseStamped`) or `/amcl_pose`
-  (`geometry_msgs/PoseWithCovarianceStamped`) when configured
-- `/scan` (`sensor_msgs/LaserScan`) when laser distance localization is enabled
-
-Jetson publishes back through rosbridge:
-
-- `/anomaly/events` (`std_msgs/String`, JSON)
-- `/anomaly/events/readable` (`std_msgs/String`, human-readable summary)
-- `/anomaly/markers` (`visualization_msgs/MarkerArray`, frame `map`)
-- `/anomaly/detections_3d` (`visualization_msgs/MarkerArray`, live bottle
-  wireframe in the RGB optical frame)
-- `/anomaly/debug_image/compressed` (`sensor_msgs/CompressedImage`)
-- `/anomaly/privacy_image/compressed` (`sensor_msgs/CompressedImage`, blurred
-  except for detected anomaly masks or bounding-box fallback)
-- `/anomaly/inspection/status` (`std_msgs/String`, inspection state machine)
-- `/anomaly/inspection/privacy_image/compressed` (`sensor_msgs/CompressedImage`,
-  best close-up privacy frame)
-- `/anomaly/map_snapshot/compressed` (`sensor_msgs/CompressedImage`)
-
-Default anomaly class is only `bottle`. YOLO can detect other objects, but they
-do not create events unless added to `ANOMALY_CLASSES`.
-
-## Configuration
-
-Compose-level settings are in `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Runtime anomaly settings live in `config/containers/jetson_anomaly.env`, matching
-the robot stack's `config/containers/*.env` layout. Important defaults:
-
-```bash
-ROSBRIDGE_URL=ws://raspberry.local:9090
-CAMERA_TOPIC=/camera/realsense/color/image_raw/compressed
-DEPTH_TOPIC=/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth
-CAMERA_INFO_TOPIC=/camera/realsense/color/camera_info
-MAP_TOPIC=/map
-ROBOT_POSE_TOPIC=/robot_pose_map
-SCAN_TOPIC=/scan
-USE_DEPTH_DISTANCE=1
-USE_CAMERA_INTRINSICS=1
-DEPTH_SYNC_TOLERANCE_S=0.35
-DEPTH_BUFFER_SIZE=8
-DEPTH_ROI_SCALE=0.60
-DEPTH_MIN_VALID_PIXELS=20
-USE_LASER_DISTANCE=1
-LASER_WINDOW_DEG=6
-ANOMALY_CLASSES=bottle
-CONFIDENCE_THRESHOLD=0.5
-DETECTION_COOLDOWN_S=5
-CLUSTER_MERGE_RADIUS_M=0.25
-MARKER_ASSOCIATION_RADIUS_M=0.40
-REPORTED_MERGE_RADIUS_M=1.00
-TRACK_REASSOCIATION_RADIUS_M=1.00
-TRACK_REASSOCIATION_RAY_TOLERANCE_M=0.35
-MARKER_MAX_FAR_JUMP_M=0.60
-ANOMALY_MIN_OBSERVATIONS=2
-ANOMALY_CONFIRMATION_TTL_S=6.0
-SAVE_PER_EVENT_IMAGES=1
-SAVE_ANNOTATED_PRIVACY_BLUR=1
-SAVE_DOCUMENTATION_IMAGES=1
-SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1
-DAILY_MAP_SUMMARY=1
-DEBUG_IMAGE_ALWAYS_STREAM=1
-DEBUG_IMAGE_ON_DETECTION=1
-DEBUG_IMAGE_PUBLISH_HZ=2
-PRIVACY_IMAGE_ENABLED=1
-PRIVACY_IMAGE_TOPIC=/anomaly/privacy_image/compressed
-PRIVACY_IMAGE_PUBLISH_HZ=2
-PRIVACY_BLUR_KERNEL_SIZE=101
-PRIVACY_BBOX_PADDING_RATIO=0.03
-PRIVACY_USE_SEGMENTATION_MASKS=1
-PRIVACY_DRAW_TRACK_ID=1
-PRIVACY_DRAW_MASK_OVERLAY=1
-MARKER_RAY_ENABLED=1
-MARKER_UNCERTAINTY_ENABLED=1
-DETECTION_3D_ENABLED=1
-DETECTION_3D_TOPIC=/anomaly/detections_3d
-DETECTION_3D_REQUIRE_MASK=1
-DETECTION_3D_PUBLISH_HZ=5
-MARKER_TTL_S=180
-MARKER_REPUBLISH_HZ=1
-DEFAULT_ANOMALY_DISTANCE_M=1.5
-CAMERA_HORIZONTAL_FOV_DEG=69
-CAMERA_YAW_OFFSET_DEG=0
-YOLO_MODEL_PATH=yolov8n-seg.pt
-YOLO_IMAGE_SIZE=640
-YOLO_IOU_THRESHOLD=0.70
-YOLO_MAX_DETECTIONS=20
-YOLO_DEVICE=0
-YOLO_HALF=1
-YOLO_AUGMENT=0
-YOLO_AGNOSTIC_NMS=0
-YOLO_FILTER_CLASSES=1
-TRACKING_ENABLED=1
-TRACKING_BACKEND=bytetrack.yaml
-TRACKING_CONFIDENCE_THRESHOLD=0.25
-SEGMENTATION_ENABLED=1
-JETSON_ARTIFACT_ROOT=/home/jetson/anomaly_logs
-JETSON_LOG_DIR=/workspace/logs
-```
-
-The structured YAML defaults live in `config/anomaly_rosbridge.yaml`.
-Environment variables from `config/containers/jetson_anomaly.env` override the
-YAML values.
-
-`TRACK_REASSOCIATION_RADIUS_M` handles tracker ID churn. If ByteTrack loses a
-bottle and assigns it a new ID, the new track can reuse the previous marker and
-reported event within this radius. Different track IDs that are visible in the
-same frame remain separate, so nearby real bottles are not collapsed into one
-object. `REPORTED_MERGE_RADIUS_M` is the same-day event deduplication radius.
-The same track ID is always treated as one physical object, regardless of a
-single depth jump. `TRACK_REASSOCIATION_RAY_TOLERANCE_M` also reconnects a
-replacement ID when its estimated point lies farther away on the same camera
-ray. `MARKER_MAX_FAR_JUMP_M` prevents that farther measurement from moving the
-canonical map marker.
-
-When RealSense camera info and aligned depth are available, Jetson uses the
-camera intrinsic matrix to calculate the horizontal ray and depth to calculate
-distance along that ray. Both features can be independently enabled with
-`USE_CAMERA_INTRINSICS` and `USE_DEPTH_DISTANCE`. If camera info has not arrived,
-the configured horizontal field of view remains the bearing fallback.
-
-Depth frames are buffered and matched to the RGB acquisition timestamp within
-`DEPTH_SYNC_TOLERANCE_S`; stale or mismatched frames are rejected. Jetson
-estimates distance from valid depth pixels inside the central part of the
-detected bounding box.
-This keeps a table leg or other obstacle in front of the object from being
-mistaken for the bottle distance. If depth is unavailable or too sparse, Jetson
-falls back to the laser range around the detected bounding-box bearing. If no
-valid scan range is available either, it falls back to
-`DEFAULT_ANOMALY_DISTANCE_M`.
-
-The event JSON includes `localization.distance_source`,
-`localization.bearing_source`, robust depth uncertainty, valid depth sample
-count, and the RGB/depth timestamp delta.
-
-The optional privacy stream blurs the complete image and restores segmentation
-masks for detections listed in `ANOMALY_CLASSES`. If no mask is available it
-falls back to the bounding box; if there is no detection, the whole frame
-remains blurred.
-
-### YOLO inference tuning
-
-Inference controls are exposed through configuration. The shipped profile is a
-low-latency Jetson starting point: 640 px input, FP16 on GPU, class filtering,
-and no test-time augmentation. For small or distant bottles, test
-`YOLO_IMAGE_SIZE=960`; it usually improves recall but costs latency. If false
-negatives dominate, test `CONFIDENCE_THRESHOLD=0.35` while keeping
-`ANOMALY_MIN_OBSERVATIONS=2` or `3`. Enable `YOLO_AUGMENT=1` only for an
-accuracy-focused benchmark because test-time augmentation is substantially
-slower. Evaluate each profile on recorded bags and choose thresholds from
-precision/recall, not from a single live scene.
-
-Detections with the same label within `CLUSTER_MERGE_RADIUS_M` are merged into
-one map square and marker text shows the observed count, for example
-`bottle x3`. A map marker/event is created only after
-`ANOMALY_MIN_OBSERVATIONS` spatially consistent observations within
-`ANOMALY_CONFIRMATION_TTL_S`, which filters one-frame pose jumps from the
-camera-to-map projection. Live markers use the wider
-`MARKER_ASSOCIATION_RADIUS_M` to keep one noisy physical object on one stable
-marker ID. Already reported objects are de-duplicated with
-`REPORTED_MERGE_RADIUS_M`, intentionally at least as wide as the live marker
-association radius. De-duplication is scoped to the current local day; older
-events remain in `events.jsonl` but do not suppress a new day's events or
-appear on a new daily map. By default Jetson saves original/annotated camera images
-for each new event and keeps a daily map summary at
-`/home/jetson/anomaly_logs/map_images/daily/anomalies_YYYY-MM-DD.png` as new
-anomaly clusters are detected.
-
-RGB, CameraInfo and aligned depth should come from the same RealSense device so
-their timestamps, pixel coordinates and optical frame agree. If the active
-RealSense compressed color topic is namespaced differently, set for example:
-
-```bash
-CAMERA_TOPIC=/camera/realsense/color/image_raw/compressed
-```
-
-or:
-
-```bash
-CAMERA_TOPIC=/camera/realsense/color/image_compressed
-```
-
-The preferred depth transport is `compressedDepth`; it avoids sending each
-640x480 16-bit raw depth image as a large base64 JSON payload through
-rosbridge. The Jetson client decodes `16UC1; compressedDepth png` directly to
-metres.
-
-## YOLO Dependencies
-
-The Dockerfile uses the JetPack 6-compatible L4T base image
-`nvcr.io/nvidia/l4t-jetpack:r36.4.0`, installs Jetson CUDA 12.6 PyTorch wheels
-from `https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/`, then installs
-Ultralytics without allowing pip to replace `torch` or `torchvision`.
-
-Default build pins:
-
-```bash
-L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
-PYTORCH_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/
-TORCH_VERSION=2.8.0
-TORCHVISION_VERSION=0.23.0
-CUDSS_VERSION=0.5.0.16
-CUSPARSELT_VERSION=0.7.1
-SYMPY_VERSION=1.13.3
-ULTRALYTICS_VERSION=8.3.40
-```
-
-Build on the Jetson with:
-
-```bash
-docker compose -f docker-compose.yaml -f docker-compose.build.yaml build jetson_anomaly
-docker compose up -d --force-recreate jetson_anomaly
-```
-
-The YOLO/PyTorch image downloads several large Jetson CUDA wheels. If the build
-fails with `No space left on device`, clean Docker's local build cache first:
-
-```bash
-docker builder prune -af
-docker system prune -af --volumes
-df -h
-```
-
-Verify the container sees CUDA:
-
-```bash
-docker exec jetson_anomaly_cont python3 - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("torch cuda:", torch.version.cuda)
-print("cuda available:", torch.cuda.is_available())
-PY
-```
-
-If you want to skip all YOLO/PyTorch installation for a mock-only image, build
-with:
-
-```bash
-INSTALL_ULTRALYTICS=false docker compose \
-  -f docker-compose.yaml \
-  -f docker-compose.build.yaml \
-  build jetson_anomaly
-```
-
-For real inference, `MOCK_MODE` must stay `0`. Use `yolov8n-seg.pt` for masks
-or `yolov8n.pt` for bounding-box-only operation. `MOCK_MODE=1` is only a
-fallback for rosbridge and visualization debugging.
-
-## Run
-
-On the Raspberry Pi:
-
-```bash
-ros2 launch rosbridge_server rosbridge_websocket_launch.xml
-ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8765 -p address:=0.0.0.0
-```
-
-On the Jetson:
-
-```bash
-cd jetson-stack
-docker compose up -d
-```
-
-The runtime Compose file intentionally has no `build:` section. GitHub Actions
-builds and loads the image on Jetson; Compose only starts the loaded image. For
-manual local builds, use the build override:
-
-```bash
-docker compose -f docker-compose.yaml -f docker-compose.build.yaml build jetson_anomaly
-docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d
-```
-
-Local development without Compose:
-
-```bash
-export PYTHONPATH=$PWD/src/jetson_anomaly_detector:$PYTHONPATH
-python3 -m jetson_anomaly_detector.jetson_yolo_rosbridge_client \
-  --config config/anomaly_rosbridge.yaml
-```
-
-## Automated Deploy
-
-GitHub Actions deploys from `devel`:
-
-1. validates Compose, Python, shell scripts, and the topic contract
-2. builds the `linux/arm64` Docker image
-3. streams the Docker archive to `docker load` on Jetson over Tailscale SSH
-4. verifies the generated and runtime image tags on Jetson
-5. runs `scripts/pull-unprotected.sh origin devel` on Jetson
-6. starts the runtime stack with `docker compose up -d --remove-orphans`
-
-One-time Jetson setup:
-
-```bash
-cd ~
-git clone <repo-url> jetson-stack
-cd jetson-stack
-cp .env.example .env
-mkdir -p anomaly_logs logs
-```
-
-Keep Jetson-specific runtime config local:
+## Runtime
 
 ```text
-.env
-config/anomaly_rosbridge.yaml
-config/containers/jetson_anomaly.env
-models/
+Raspberry Pi camera, depth, scan, map and pose topics
+                        |
+                  rosbridge :9090
+                        |
+                   Jetson Orin
+                        |
+       YOLO segmentation, tracking and localization
+                        |
+       images, JSONL events and visualization topics
 ```
 
-Those paths are protected by `scripts/protected-files.txt`.
+The Compose stack starts:
 
-GitHub repository secrets:
+- `jetson_anomaly`, using `filipsijak2/jetson_anomaly:jetson_anomaly-dev-local`
+- `jetson_log_viewer`, exposing read-only artifact directories on port `8081`
+
+## Active configuration
+
+The application runtime configuration consists of two files:
+
+- `config/anomaly_rosbridge.yaml` contains topic names, model settings, thresholds, tracking, privacy output, 3D detections and inspection settings.
+- `config/containers/jetson_anomaly.env` contains the runtime environment loaded by Compose.
+
+Environment values override equivalent YAML values. Keep both files synchronized when changing a duplicated setting.
+
+The active model is `yolov8n-seg.pt`, the anomaly class is `bottle`, tracking uses `bytetrack.yaml`, and GPU inference uses device `0` with half precision.
+
+The active Raspberry Pi endpoint is:
+
+```env
+ROSBRIDGE_URL=ws://raspberry.local:9090
+```
+
+The configured inputs are:
+
+- `/camera/realsense/color/image_raw/compressed`
+- `/camera/realsense/aligned_depth_to_color/image_raw/compressedDepth`
+- `/camera/realsense/color/camera_info`
+- `/map`
+- `/robot_pose_map`
+- `/scan`
+
+The configured outputs are:
+
+- `/anomaly/events`
+- `/anomaly/events/readable`
+- `/anomaly/markers`
+- `/anomaly/detections_3d`
+- `/anomaly/debug_image/compressed`
+- `/anomaly/privacy_image/compressed`
+- `/anomaly/map_snapshot/compressed`
+- `/anomaly/inspection/*`
+
+## Storage
+
+Compose mounts:
+
+- `./models` at `/workspace/models`
+- `./anomaly_logs` at `/home/jetson/anomaly_logs`
+- `./logs` at `/workspace/logs`
+
+Model binaries, generated images and logs are ignored by Git. See [models/README.md](./models/README.md) for model placement.
+
+## Start
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose logs -f jetson_anomaly
+```
+
+For a local image build:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml build
+```
+
+## Validation
+
+```bash
+python -m pip install -r requirements-yolo.txt -r requirements-rosbridge.txt
+pytest -q
+python -m compileall src/jetson_anomaly_detector/jetson_anomaly_detector
+bash -n scripts/start_jetson_anomaly.sh
+```
+
+## Deployment workflow
+
+The GitHub Actions deployment job requires these repository secrets:
 
 - `TAILSCALE_AUTHKEY`
 - `JETSON_SSH_USER`
 - `JETSON_SSH_PRIVATE_KEY_B64` or `JETSON_SSH_PRIVATE_KEY`
 
-GitHub repository variables:
-
-- `JETSON_HOST`, default `100.125.121.125`
-- `JETSON_STACK_DIR`, default `~/jetson-stack`
-
-`scripts/pull-unprotected.sh` only updates files listed in
-`scripts/runtime-files.txt`, and it skips protected files when they already
-exist locally. This means a deploy updates the Compose/runtime wrapper without
-overwriting Jetson-local topics, rosbridge URL, YOLO model path, or artifacts.
-
-## Event JSON
-
-Example `/anomaly/events` payload:
-
-```json
-{
-  "id": "anom_00042",
-  "timestamp": "2026-06-16T14:22:31Z",
-  "label": "bottle",
-  "type": "semantic_object_anomaly",
-  "confidence": 0.87,
-  "track_id": 7,
-  "segmentation_mask_used": true,
-  "status": "active",
-  "ttl_sec": 180,
-  "bbox_xyxy": [312, 210, 390, 420],
-  "robot_pose_map": {"x": 1.52, "y": -0.48, "yaw": 1.31},
-  "object_pose_map": {"x": 2.10, "y": -0.92, "z": 0.0},
-  "localization": {
-    "distance_m": 0.82,
-    "distance_source": "depth",
-    "distance_uncertainty_m": 0.03,
-    "distance_valid_samples": 642,
-    "depth_axial_m": 0.80,
-    "rgb_depth_delta_s": 0.018,
-    "bearing_source": "camera_intrinsics"
-  },
-  "cluster": {"id": "cluster_00003", "count": 2, "merge_radius_m": 0.2},
-  "jetson_files": {
-    "original_image": "/home/jetson/anomaly_logs/images/original/anom_00042_bottle.jpg",
-    "annotated_image": "/home/jetson/anomaly_logs/images/annotated/anom_00042_bottle.jpg",
-    "map_snapshot": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
-    "daily_map_summary": "/home/jetson/anomaly_logs/map_images/daily/anomalies_2026-06-20.png",
-    "event_log": "/home/jetson/anomaly_logs/events.jsonl"
-  }
-}
-```
-
-For Foxglove, use `/anomaly/events/readable` when you want a compact
-human-readable event summary. Keep `/anomaly/events` for machine parsing and
-bag analysis.
-
-## Saved Artifacts
-
-Jetson writes:
-
-- original frames: `/home/jetson/anomaly_logs/images/original/`
-- annotated frames: `/home/jetson/anomaly_logs/images/annotated/` (blurred
-  outside the detected bottle when `SAVE_ANNOTATED_PRIVACY_BLUR=1`)
-- synchronized documentation sets:
-  `/home/jetson/anomaly_logs/images/documentation/`. When
-  `SAVE_DOCUMENTATION_IMAGES=1`, every confirmed event attempts to save four
-  same-frame views named `01_rgb_bbox.jpg`, `02_mask_raw.png`,
-  `03_mask_eroded.png`, and `04_depth_colormap.png`. A segmentation mask and a
-  synchronized aligned-depth frame are required for a complete set. The RGB
-  view preserves privacy by blurring the background and leaving only the
-  segmented object visible before drawing its bounding box. Complete sets are
-  also assembled automatically as a labeled 2-by-2 figure named
-  `05_documentation_composite.png` for direct use in reports. If an object is
-  suppressed by daily event de-duplication or cooldown, the first track frame
-  with a valid synchronized depth measurement is still saved once under a
-  `capture_<label>_track_<id>_<timestamp>_...` prefix. Documentation capture
-  therefore does not require a new anomaly event.
-- three-frame tracking documentation sequences in the same directory. When
-  `SAVE_TRACKING_DOCUMENTATION_SEQUENCE=1`, the first three consecutive
-  inference frames for each segmented track are assembled horizontally as
-  `tracking_<label>_track_<id>_<timestamp>_three_frame_sequence.png`. Every
-  panel uses the privacy background and shows the segmentation mask,
-  confidence, estimated distance, and distance source.
-- daily map summaries: `/home/jetson/anomaly_logs/map_images/daily/`
-- map snapshots: `/home/jetson/anomaly_logs/map_images/`
-- JSONL event log: `/home/jetson/anomaly_logs/events.jsonl`
-- reviews: `/home/jetson/anomaly_logs/event_reviews.jsonl`
-- performance samples: `/home/jetson/anomaly_logs/evaluation/performance.jsonl`
-- latest evaluation report:
-  `/home/jetson/anomaly_logs/evaluation/latest/report.html`
-
-The Compose file mounts this directory to `./anomaly_logs` on the Jetson repo
-checkout for easy inspection.
-
-Quick FP review and report:
-
-```bash
-python3 scripts/mark_last_event_fp.py --date yesterday
-python3 scripts/generate_cv_report.py
-```
-
-Runtime stdout/stderr from `jetson_yolo_rosbridge_client` is also appended to:
-
-```text
-./logs/jetson_anomaly_YYYYMMDD.log
-```
-
-## Log Viewer
-
-The Compose stack includes a lightweight File Browser webapp, matching the
-robot stack pattern:
-
-```bash
-docker compose up -d jetson_log_viewer
-```
-
-Open:
-
-```text
-http://<jetson-ip>:8081
-```
-
-It exposes:
-
-- `logs/`: daily Jetson anomaly client runtime logs
-- `anomaly_logs/`: original images, annotated images, map snapshots, and
-  `events.jsonl`
-
-Change the host port in `.env`:
-
-```bash
-JETSON_LOG_VIEWER_PORT=8081
-```
-
-## Foxglove
-
-Connect Foxglove to the Raspberry Pi:
-
-```text
-ws://raspberry.local:8765
-```
-
-Useful panels/topics:
-
-- `/map`
-- `/tf`, `/tf_static`
-- `/scan` or `/scan_filtered`
-- `/odom`
-- `/robot_pose_map`
-- `/anomaly/markers`
-- `/anomaly/detections_3d`
-- `/anomaly/events`
-- `/anomaly/debug_image/compressed`
-- `/anomaly/privacy_image/compressed`
-- `/anomaly/inspection/status`
-- `/anomaly/inspection/privacy_image/compressed`
-- `/anomaly/map_snapshot/compressed`
-
-Markers are republished at 1 Hz and expire after `MARKER_TTL_S`, default 180
-seconds. Expired markers are deleted through `visualization_msgs/Marker.DELETE`.
-
-## Test Procedure
-
-1. Start the Raspberry Pi robot stack.
-2. Confirm compressed camera publishing.
-3. Start rosbridge on the Raspberry Pi, port `9090`.
-4. Start foxglove_bridge on the Raspberry Pi, port `8765`.
-5. Start `/robot_pose_map` publisher if `/amcl_pose` is not used directly.
-6. Open Foxglove and connect to `ws://raspberry.local:8765`.
-7. Start the Jetson YOLO rosbridge client.
-8. Place a bottle in front of the camera.
-9. Confirm Jetson logs a bottle detection.
-10. Confirm original and annotated images are saved locally on Jetson.
-11. Confirm `events.jsonl` is appended locally on Jetson.
-12. Confirm a map snapshot PNG is saved locally on Jetson.
-13. Confirm `/anomaly/events` publishes JSON.
-14. Confirm `/anomaly/markers` publishes in `map` frame.
-15. Confirm `/anomaly/debug_image/compressed` publishes.
-16. Confirm `/anomaly/privacy_image/compressed` is blurred outside detected bottles.
-17. Confirm `/anomaly/map_snapshot/compressed` publishes.
-18. Confirm Foxglove shows `ANOMALY: bottle` on the map.
-19. Confirm the marker remains visible for 180 seconds and then disappears.
-20. Confirm existing robot navigation still works.
+It also requires the `JETSON_HOST` repository variable. `JETSON_STACK_DIR` is optional and defaults to `~/jetson-stack`.

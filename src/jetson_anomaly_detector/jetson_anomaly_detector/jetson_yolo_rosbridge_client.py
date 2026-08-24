@@ -2691,7 +2691,7 @@ def build_tracking_documentation_frame(
     )
     info = (
         f"track ID={track_text}  confidence={detection.confidence:.2f}  "
-        f"udaljenost={distance_estimate.distance_m:.2f} m  "
+        f"distance={distance_estimate.distance_m:.2f} m  "
         f"izvor={distance_estimate.source}"
     )
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -2984,7 +2984,7 @@ def build_documentation_composite(
         ("rgb_bbox", "(a) Privacy RGB prikaz i bounding box"),
         ("mask_raw", "(b) Izvorna segmentacijska maska"),
         ("mask_eroded", "(c) Erodirana segmentacijska maska"),
-        ("depth_colormap", "(d) Valjani depth pikseli prema udaljenosti"),
+        ("depth_colormap", "(d) Valid depth pixels by distance"),
     )
     if any(key not in images or images[key].size == 0 for key, _ in panels):
         return None
