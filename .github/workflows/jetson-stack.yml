@@ -21,8 +21,8 @@ concurrency:
 
 env:
   IMAGE_BASE: jetson_anomaly
-  JETSON_HOST: ${{ vars.JETSON_HOST }}
-  JETSON_STACK_DIR: ${{ vars.JETSON_STACK_DIR || '~/jetson-stack' }}
+  JETSON_HOST: ${{ secrets.JETSON_HOST || vars.JETSON_HOST }}
+  JETSON_STACK_DIR: ${{ secrets.JETSON_STACK_DIR || vars.JETSON_STACK_DIR || '~/jetson-stack' }}
   IMAGE_ARCHIVE: /tmp/jetson_anomaly_image.tar
 
 jobs:
@@ -205,7 +205,7 @@ jobs:
             exit 1
           fi
           if [ -z "$JETSON_HOST" ]; then
-            echo "JETSON_HOST repository variable is required." >&2
+            echo "JETSON_HOST secret or repository variable is required." >&2
             exit 1
           fi
           curl -fsSL https://tailscale.com/install.sh | sh

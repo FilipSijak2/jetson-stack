@@ -99,4 +99,4 @@ The GitHub Actions deployment job requires these repository secrets:
 - `JETSON_SSH_USER`
 - `JETSON_SSH_PRIVATE_KEY_B64` or `JETSON_SSH_PRIVATE_KEY`
 
-It also requires the `JETSON_HOST` repository variable. `JETSON_STACK_DIR` is optional and defaults to `~/jetson-stack`.
+It also requires `JETSON_HOST`, preferably as a repository secret. A repository variable with the same name is supported as a fallback. `JETSON_STACK_DIR` accepts either form and defaults to `~/jetson-stack`.
